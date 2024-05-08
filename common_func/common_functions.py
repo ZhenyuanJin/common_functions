@@ -5245,9 +5245,56 @@ def add_side_ax(ax, position, relative_size, pad, sharex=None, sharey=None, hide
     return new_ax
 
 
-def zoom_in():
-    '''https://matplotlib.org/stable/gallery/subplots_axes_and_figures/zoom_inset_axes.html#sphx-glr-gallery-subplots-axes-and-figures-zoom-inset-axes-py'''
-    pass
+def add_zoom_in_ax(ax, bounds, xlim, ylim, edgecolor=BLACK, **kwargs):
+    '''
+    放大指定轴的显示范围。
+    :param ax: matplotlib的轴对象，用于绘制图形。
+    :param bounds: list, 新ax的范围,相对于ax，为一个四元组(left, bottom, width, height)。比如(0.5, 0.5, 0.4, 0.4)表示zoom_in_ax的左下角在ax的(0.5, 0.5)位置，宽度和高度都是0.4
+    :param xlim: 将要放大的原图的x轴范围，一个二元组(x1, x2)。
+    :param ylim: 将要放大的原图的y轴范围，一个二元组(y1, y2)。
+    :param edgecolor: 放大框的边框颜色，默认为BLACK。
+    :param kwargs: 传递给`ax.inset_axes`的其他参数。
+
+    注意:
+    - 该函数会在原图上绘制一个放大框，并返回新的ax对象。
+    - 获得新的ax后仍需要再在新的ax上绘制图形，否则为空白。
+    '''
+    # 创建新的ax
+    zoom_in_ax = ax.inset_axes(bounds, xlim=xlim, ylim=ylim, xticklabels=[], yticklabels=[], **kwargs)
+    # 绘制放大框
+    ax.indicate_inset_zoom(zoom_in_ax, edgecolor=edgecolor)
+    return zoom_in_ax
+
+@to_be_improved
+def add_span_zoom_in_ax(ax, bounds, xlim, ylim, edgecolor=BLACK, **kwargs):
+    '''
+    https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axes_zoom_effect.html#sphx-glr-gallery-subplots-axes-and-figures-axes-zoom-effect-py
+    '''
+    # 创建新的ax
+    zoom_in_ax = ax.inset_axes(bounds, xlim=xlim, ylim=ylim, xticklabels=[], yticklabels=[], **kwargs)
+    # 绘制放大框
+    ax.indicate_inset_zoom(zoom_in_ax, edgecolor=edgecolor)
+    return zoom_in_ax
+
+
+def add_twin_ax(ax, axis):
+    '''
+    在指定轴上添加一个新的双轴。
+    :param ax: matplotlib的轴对象，用于绘制图形。
+    :param axis: 新双轴的位置，'x'或'y'。
+
+    注意: 
+    axis为'x'时,share x轴,新轴的y轴在右边;axis为'y'时,share y轴,新轴的x轴在上边。
+    假如后续更改了原ax的位置,需要同步设置twin_ax的位置。
+    '''
+    if axis == 'x':
+        twin_ax = ax.twinx()
+        twin_ax.set_position(ax.get_position())
+        return twin_ax
+    elif axis == 'y':
+        twin_ax = ax.twiny()
+        twin_ax.set_position(ax.get_position())
+        return twin_ax
 # endregion
 
 
@@ -5273,6 +5320,17 @@ def set_ax_view_3d(ax, elev=ELEV, azim=AZIM):
 
 
 # region 初级作图函数(ax位置相关)
+@direct_use
+def get_ax_position(ax):
+    '''
+    获取轴的位置。
+    
+    参数:
+    - ax: matplotlib的Axes对象
+    '''
+    return ax.get_position().bounds
+
+
 def set_ax_position(ax, left, right, bottom, top):
     '''
     设置轴的位置。
@@ -5546,36 +5604,6 @@ def get_extreme_ax_position(*args, position):
 
 
 # region 初级作图函数(cmap)
-def visualize_cmap(cmap_type='all'):
-    '''
-    可视化所有的颜色映射。
-    '''
-    all_cmaps = plt.colormaps()
-
-    cmap_num = 0
-    for i, cmap in enumerate(all_cmaps):
-        cmap_obj = plt.get_cmap(cmap)
-        if cmap_type == 'all' or \
-           (cmap_type == 'discrete' and cmap_obj.N < 256) or \
-           (cmap_type == 'continuous' and cmap_obj.N == 256):
-            cmap_num += 1
-
-    fig, ax = get_fig_ax(ncols=1, nrows=cmap_num, ax_height=1)
-
-    ax_idx = 0
-    for i, cmap in enumerate(all_cmaps):
-        cmap_obj = plt.get_cmap(cmap)
-        if cmap_type == 'all' or \
-           (cmap_type == 'discrete' and cmap_obj.N < 256) or \
-           (cmap_type == 'continuous' and cmap_obj.N == 256):
-            gradient = np.linspace(0, 1, 256).reshape(1, -1)
-            ax[ax_idx].imshow(gradient, aspect='auto', cmap=cmap)
-            ax[ax_idx].set_title(cmap)
-            ax[ax_idx].axis('off')
-            ax_idx += 1
-    return fig, ax
-
-
 def get_cmap(colors, continuous=True):
     '''
     生成颜色映射。
@@ -6237,6 +6265,13 @@ def add_hline(ax, y, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, line
     return ax.axhline(y, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
 
 
+@to_be_improved
+def add_cross_line(ax, x, y, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
+    'https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axhspan_demo.html#sphx-glr-gallery-subplots-axes-and-figures-axhspan-demo-py'
+    'https://matplotlib.org/stable/gallery/pyplots/axline.html#sphx-glr-gallery-pyplots-axline-py'
+    pass
+
+
 def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
     '''
     在指定位置添加网格线。
@@ -6254,6 +6289,14 @@ def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_
         ax.axvline(x, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
     for y in y_list:
         ax.axhline(y, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
+# endregion
+
+
+# region 初级作图函数(添加span)
+@to_be_improved
+def add_vspan(ax, xmin, xmax, label=None, color=RED, alpha=0.3, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
+    'https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axhspan_demo.html#sphx-glr-gallery-subplots-axes-and-figures-axhspan-demo-py'
+    pass
 # endregion
 
 
@@ -7300,7 +7343,7 @@ def plt_voxel_heatmap(ax, data, cmap=CMAP, vmin=None, vmax=None, edgecolors=BLAC
 
 
 # region 复杂作图函数(matplotlib系列,输入dataframe使用)
-def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=RANA, vmin=None, vmax=None, smin=None, smax=None, rel_smin=0.1, rel_smax=0.4, add_cbar=True, cbar_position=None, cbar_label=None, size_label=None, grid_kwargs=None, scatter_kwargs=None, cbar_kwargs=None, scatter_cbar_kwargs=None):
+def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=RANA, vmin=None, vmax=None, smin=None, smax=None, rel_smin=0.1, rel_smax=0.4, add_cbar=True, cbar_position=None, cbar_label=None, size_label=None, align_label_coord=4, grid_kwargs=None, scatter_kwargs=None, cbar_kwargs=None, scatter_cbar_kwargs=None):
     '''
     使用DataFrame绘制圆形热图
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -7403,6 +7446,7 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
 
             same_color_cmap = get_cmap([edgecolor, edgecolor]) # 生成一个只有一种颜色的cmap(因为这里只表达大小不表达颜色)
             add_scatter_colorbar(size_side_ax, scatter_smin=scatter_smin, scatter_smax=scatter_smax, cmap=same_color_cmap, vmin=smin, vmax=smax, cbar_label=size_label, cbar_position=cbar_position, **scatter_cbar_kwargs)
+            align_label_manual([size_side_ax, cbar_side_ax], axis='y', label_coord=align_label_coord)
             return cbars
 
 
@@ -8073,6 +8117,63 @@ def set_ax_aspect_3d(ax, aspect=(1, 1, 1), adjustable='datalim', **kwargs):
 
 
 # region title, label, tick调整函数
+def align_label(axs, axis, fig=None):
+    '''
+    将多个轴的标签对齐。
+
+    参数:
+    - axs: matplotlib的Axes对象或对象列表,array([ax1, ax2, ...])
+    - axis: 对齐的轴,可以是'x', 'y'
+    - fig: matplotlib的Figure对象
+
+    注意:
+    - 假如某个ax的轴在左侧，而其他的在右侧，那么无法对齐。
+    - 如果出现无法对齐的情况,可以尝试align_label_manual。
+    '''
+    if fig is None:
+        fig = axs[0].get_figure()
+    if axis == 'x':
+        fig.align_xlabels(axs)
+    elif axis == 'y':
+        fig.align_ylabels(axs)
+
+
+def align_label_manual(axs, axis, label_coord):
+    '''
+    将多个轴的标签对齐。
+
+    参数:
+    - axs: matplotlib的Axes对象或对象列表,array([ax1, ax2, ...])
+    - axis: 对齐的轴,可以是'x', 'y'
+    '''
+    if axis == 'x':
+        for ax in axs:
+            ax.xaxis.set_label_coords(0.5, label_coord)
+    elif axis == 'y':
+        for ax in axs:
+            ax.yaxis.set_label_coords(label_coord, 0.5)
+
+
+def move_axis(ax, axis, position):
+    '''
+    将ax的某个轴移动到指定位置。
+    '''
+    if axis == 'y':
+        if position == 'right':
+            ax.yaxis.tick_right()
+            ax.yaxis.set_label_position('right')
+        elif position == 'left':
+            ax.yaxis.tick_left()
+            ax.yaxis.set_label_position('left')
+    elif axis == 'x':
+        if position == 'top':
+            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position('top')
+        elif position == 'bottom':
+            ax.xaxis.tick_bottom()
+            ax.xaxis.set_label_position('bottom')
+
+
 def get_label_obj(ax, axis):
     if axis == 'x':
         return ax.xaxis.get_label()
