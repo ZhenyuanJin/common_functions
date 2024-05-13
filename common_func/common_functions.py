@@ -17,7 +17,7 @@ from multiprocessing import Process
 from pathlib import Path
 import inspect
 import types
-from functools import wraps
+from functools import wraps, partial
 import importlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from io import StringIO
@@ -46,8 +46,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
-from matplotlib.ticker import FuncFormatter, ScalarFormatter
-from matplotlib.colors import BoundaryNorm, Normalize, ListedColormap
+from matplotlib.ticker import FuncFormatter, ScalarFormatter, LogFormatter, LogFormatterExponent, LogFormatterMathtext, LogFormatterSciNotation, PercentFormatter
+from matplotlib.colors import BoundaryNorm, Normalize, ListedColormap, SymLogNorm, LogNorm, TwoSlopeNorm
 from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
@@ -154,13 +154,19 @@ SAVEFIG_DPI = 300     # 默认保存图形分辨率
 SAVEFIG_VECTOR_FORMAT = 'pdf'   # 默认保存图形的矢量图格式
 SAVEFIG_RASTER_FORMAT = 'png'   # 默认保存图形的位图格式
 SAVEFIG_FORMAT = SAVEFIG_VECTOR_FORMAT     # 默认保存图形的格式
-TOP_SPINE = True     # 默认隐藏上方的轴脊柱
-RIGHT_SPINE = True     # 默认隐藏右方的轴脊柱
+TOP_SPINE = False     # 默认隐藏上方的轴脊柱
+RIGHT_SPINE = False     # 默认隐藏右方的轴脊柱
 LEFT_SPINE = True     # 默认显示左方的轴脊柱
 BOTTOM_SPINE = True     # 默认显示下方的轴脊柱
 LEGEND_LOC = 'upper right'      # 图例位置
 PDF_FONTTYPE = 42     # 使pdf文件中的文字可编辑
 PAD_INCHES = 0.2     # 默认图形边距
+USE_MATHTEXT = True     # 使用数学文本
+AXES_LINEWIDTH = LINE_WIDTH     # 设置坐标轴线宽
+TICK_MAJOR_WIDTH = 2    # x轴主刻度线的宽度
+TICK_MINOR_WIDTH = 1    # x轴次刻度线的宽度
+TICK_MAJOR_SIZE = 8     # x轴主刻度线的长度
+TICK_MINOR_SIZE = 4     # x轴次刻度线的长度
 # endregion
 
 
@@ -184,6 +190,16 @@ plt.rcParams['savefig.dpi'] = SAVEFIG_DPI      # 保存图像的分辨率
 plt.rcParams['legend.loc'] = LEGEND_LOC      # 图例位置
 plt.rcParams['pdf.fonttype'] = PDF_FONTTYPE     # 使pdf文件中的文字可编辑
 plt.rcParams['savefig.pad_inches'] = PAD_INCHES     # 图形边距
+plt.rcParams['axes.formatter.use_mathtext'] = USE_MATHTEXT     # 使用数学文本
+plt.rcParams['axes.linewidth'] = LINE_WIDTH     # 设置坐标轴线宽
+plt.rcParams['xtick.major.width'] = TICK_MAJOR_WIDTH   # x轴主刻度线的宽度
+plt.rcParams['xtick.minor.width'] = TICK_MINOR_WIDTH   # x轴次刻度线的宽度
+plt.rcParams['ytick.major.width'] = TICK_MAJOR_WIDTH   # y轴主刻度线的宽度
+plt.rcParams['ytick.minor.width'] = TICK_MINOR_WIDTH   # y轴次刻度线的宽度
+plt.rcParams['xtick.major.size'] = TICK_MAJOR_SIZE  # x轴主刻度线的长度
+plt.rcParams['xtick.minor.size'] = TICK_MINOR_SIZE   # x轴次刻度线的长度
+plt.rcParams['ytick.major.size'] = TICK_MAJOR_SIZE  # y轴主刻度线的长度
+plt.rcParams['ytick.minor.size'] = TICK_MINOR_SIZE   # y轴次刻度线的长度
 #endregion
 
 
@@ -242,7 +258,7 @@ CBAR_POSITION_3D = {'position': 'right', 'size': 0.05, 'pad': SIDE_PAD * 6}
 TICK_PROPORTION = 0.9    # 刻度标签的拥挤程度,1代表完全贴住,见suitable_tick_size与adjust_ax_tick
 
 
-# 颜色映射参数
+# 颜色映射参数(注意,颜色映射在使用整数调用时会出现和使用浮点数调用时不同的效果,比如输入1会映射到第一个颜色,但输入1.0会映射到cmap的最顶端)
 CMAP = plt.cm.viridis
 HEATMAP_CMAP = plt.cm.jet
 DENSITY_CMAP = mcolors.LinearSegmentedColormap.from_list("density_cmap", [RANA, BLUE])
@@ -674,6 +690,8 @@ def get_prompt(prompt_type):
         return '帮我修改这个函数使得注释完整(注释使用中文,但注释的标点是英文标点)，功能完整且正确，函数名和变量名规范协调简洁(但是并不是修改越多就越好,需要尊重我的命名方式但是在必要的时刻作出适当的改动)，并给出运行测试例子甚至可视化的代码'
     if prompt_type == 'write_code':
         return '帮我写一个函数使得注释完整(注释使用中文,但注释的标点是英文标点)，功能完整且正确，函数名和变量名规范协调简洁，并给出运行测试例子甚至可视化的代码'
+    if prompt_type == 'write_annotation':
+        return 'see rule'
     if prompt_type == 'paper':
         return '帮我修改这段文字使得语法通顺，逻辑清晰，表达准确，且符合学术规范'
     if prompt_type == 'translate_english':
@@ -1819,6 +1837,37 @@ def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
         return f"{number:.{digits}%}"
 
 
+def format_float_math_log(num, round_digits=ROUND_DIGITS, allclose_tol=1e-10):
+    """
+    格式化浮点数为科学计数法，并添加花括号。
+
+    参数:
+    - num (float): 待格式化的浮点数。
+    - round_digits (int, optional): 四舍五入的小数位数，默认为ROUND_DIGITS。
+    - allclose_tol (float, optional): 用于判断是否为0的容差，默认为1e-10。
+
+    返回:
+    - str: 格式化后的科学计数法字符串，带有花括号。
+
+    注意:
+    - 如果num为0,则返回"$0$";但是对于相当小的数,有可能allclose(0),但是不为0,这时候需要调整np.allclose的参数
+    """
+    if np.allclose(num, 0, atol=allclose_tol):
+        return "$0$"
+    else:
+        exponent = int(np.floor(np.log10(abs(num))))
+        coefficient = num / (10 ** exponent)
+        if np.allclose(coefficient, 0):
+            return "$0$"
+        if np.allclose(coefficient, 1):
+            return f"$10^{{{str(exponent)}}}$"
+        elif np.allclose(coefficient, -1):
+            return f"$-10^{{{str(exponent)}}}$"
+        else:
+            coefficient = round(coefficient, round_digits)
+            return f"${coefficient}x10^{{{str(exponent)}}}$"
+
+
 def align_decimal(number, reference_value):
     '''
     将数字的小数点位数调整为与参考值相匹配。
@@ -1920,6 +1969,8 @@ def update_dict(original_dict, new_dict):
     if new_dict is None:
         return original_dict.copy()
     else:
+        if original_dict is None:
+            original_dict = {}
         return {**original_dict, **new_dict}
 # endregion
 
@@ -2309,6 +2360,20 @@ def gradient_step_linspace(start, end, num, endpoint=True, gradient='center'):
     elif gradient == 'right':
         gradient_func = lambda x: np.sin(x * np.pi / 2)
         return gradient_func(np.linspace(0, 1, num, endpoint=endpoint)) * (end - start) + start
+
+
+def insert_mid(arr):
+    '''在数组中间插入相邻元素的平均值'''
+    new_arr = []
+    for i in range(len(arr)):
+        new_arr.append(arr[i])
+        if i < len(arr) - 1:
+            new_arr.append((arr[i] + arr[i+1]) / 2)
+    
+    if isinstance(arr, np.ndarray):
+        return np.array(new_arr)
+    else:
+        return new_arr
 # endregion
 
 
@@ -2562,6 +2627,14 @@ def sort_df(df, sort_by='index', axis=0, key=None, reverse=False):
 
 
 # region 函数处理相关函数
+@direct_use
+def fix_param(func, **kwargs):
+    '''
+    固定函数的部分参数，返回一个新的函数。
+    '''
+    return partial(func, **kwargs)
+
+
 def globalize_func(func):
     global_func_name = func.__name__
     globals()[global_func_name] = func
@@ -2865,16 +2938,30 @@ def npnan_in_list(lst):
 
 
 # region 数据处理相关函数(缩放、标准化、裁剪、按比例分配、划分)
-def expand_range(min_val, max_val, expand_prop):
+def scale_range(min_val, max_val, prop):
     '''
     根据最小值和最大值计算扩展后的范围。
 
     :param min_val: 一个数值，代表最小值
     :param max_val: 一个数值，代表最大值
-    :param expand_prop: 一个数值，代表扩展比例(注意, expand_prop代表的是扩展的比例, 0.1表示10%的扩展, 这里不要输入1.1)
+    :param prop: 一个数值，代表新的范围相对于原范围的比例
     :return: 一个包含两个元素的元组，代表扩展后的范围
     '''
-    return min_val - (max_val - min_val) * expand_prop, max_val + (max_val - min_val) * expand_prop
+    return min_val - (prop - 1) / 2 * (max_val - min_val), max_val + (prop - 1) / 2 * (max_val - min_val)
+
+
+def scale_to_new_range(data, old_min, old_max, new_min, new_max):
+    '''
+    将数据缩放到新的范围。
+    
+    参数:
+    - data: 输入数据
+    - old_min: 原始数据的最小值。
+    - old_max: 原始数据的最大值。
+    - new_min: 新的最小值。
+    - new_max: 新的最大值。
+    '''
+    return (data - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
 
 
 def get_z_score(data):
@@ -4164,15 +4251,23 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, **kwargs):
     :param y: y轴的数据
     :param label: 图例标签,默认为None
     :param color: 散点图的颜色,默认为BLUE
+    :param vert: 是否为垂直散点图,默认为True,即纵向
     :param kwargs: 其他plt.scatter支持的参数
+
+    注意
+    -s是marker_size的平方
+    -s是圆的面积,radius按照points的单位
     '''
     # 画图
     if not vert:
         x, y = y, x
     if 'c' in kwargs:
-        if not isinstance(kwargs['c'][0], list):
-            kwargs['c'] = [kwargs['c']]
-        return ax.scatter(x, y, label=label, **kwargs)
+        local_kwargs = kwargs.copy()
+        local_kwargs['c'] = pure_list(local_kwargs['c'])
+        if len(list_shape(local_kwargs['c'])) == 1:
+            local_kwargs['c'] = [local_kwargs['c']]
+        # 不输入color参数
+        return ax.scatter(x, y, label=label, **local_kwargs)
     else:
         return ax.scatter(x, y, label=label, color=color, **kwargs)
 
@@ -4345,7 +4440,7 @@ def plt_quiver(ax, X, Y, U, V, color=BLUE, angles='xy', scale_units='xy', scale=
                      scale_units=scale_units, scale=scale, width=width, **kwargs)
 
 
-def plt_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, **kwargs):
+def plt_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, broken_streamlines=True, **kwargs):
     '''
     使用 x, y 和 u, v 绘制流场图
     
@@ -4357,15 +4452,16 @@ def plt_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, **kwargs):
     :param label: 图例标签,默认为 None
     :param color: 流线的颜色,默认为 BLUE
     :param density: 流线的密度,默认为 1
+    :param broken_streamlines: 是否绘制断裂的流线,默认为 True
     :param kwargs: 其他 plt.streamplot 支持的参数
     '''
     if label is not None:
         ax.plot([], [], color=color, label=label)
     # 绘制流场图
-    return ax.streamplot(x, y, u, v, color=color, density=density, **kwargs)
+    return ax.streamplot(x, y, u, v, color=color, density=density, broken_streamlines=broken_streamlines, **kwargs)
 
 
-def plt_speed_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, cmap=DENSITY_CMAP, cbar_kwargs=None, **kwargs):
+def plt_speed_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, broken_streamlines=True, cmap=DENSITY_CMAP, cbar_kwargs=None, **kwargs):
     '''
     使用 x, y 和 u, v 绘制流场图,并叠加颜色编码图表示流场大小
     
@@ -4377,6 +4473,7 @@ def plt_speed_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, cmap=DEN
     :param label: 图例标签,默认为 None
     :param color: 流线的颜色,默认为 BLUE
     :param density: 流线的密度,默认为 1
+    :param broken_streamlines: 是否绘制断裂的流线,默认为 True
     :param cmap: 流速的颜色映射表,默认为 DENSITY_CMAP
     :param kwargs: 其他 plt.streamplot 和 plt.pcolormesh 支持的参数
     '''
@@ -4386,7 +4483,7 @@ def plt_speed_stream(ax, x, y, u, v, label=None, color=BLUE, density=1, cmap=DEN
         cbar_kwargs = {}
     # 绘制流场图和绘制颜色编码图
     speed_mesh = ax.pcolormesh(x, y, np.sqrt(u**2 + v**2), cmap=cmap)
-    return ax.streamplot(x, y, u, v, color=color, density=density, **kwargs), speed_mesh, add_side_colorbar(ax, speed_mesh, cmap=cmap, cbar_label='speed', **cbar_kwargs)
+    return ax.streamplot(x, y, u, v, color=color, density=density, broken_streamlines=broken_streamlines, **kwargs), speed_mesh, add_side_colorbar(ax, speed_mesh, cmap=cmap, cbar_label='speed', **cbar_kwargs)
 
 
 def plt_box(ax, x, y, label=None, patch_artist=True, boxprops=None, vert=True, **kwargs):
@@ -4404,13 +4501,11 @@ def plt_box(ax, x, y, label=None, patch_artist=True, boxprops=None, vert=True, *
     if boxprops is None:
         boxprops = dict(facecolor=BLUE)
 
-    # 添加一个高度为0的bar，用于添加图例，调整以支持横向箱形图
+    # 添加bar，用于添加图例，调整以支持横向箱形图
     if vert:
-        ax.bar(x[0], 0, width=0, bottom=np.nanmean(y[0]),
-               color=boxprops['facecolor'], linewidth=0, label=label, **kwargs)
+        ax.bar([], [], color=boxprops['facecolor'], label=label, **kwargs)
     else:
-        ax.barh(x[0], 0, height=0, left=np.nanmean(
-            y[0]), color=boxprops['facecolor'], linewidth=0, label=label, **kwargs)
+        ax.barh([], [], olor=boxprops['facecolor'], label=label, **kwargs)
 
     # 画图
     return ax.boxplot(list(y), positions=x, patch_artist=patch_artist, boxprops=boxprops, vert=vert, **kwargs)
@@ -4487,7 +4582,7 @@ def plt_hexbin(ax, x, y, gridsize=BIN_NUM, cmap=DENSITY_CMAP, **kwargs):
     return ax.hexbin(x, y, gridsize=gridsize, cmap=cmap, **kwargs)
 
 
-def plt_contour(ax, x, y, z, levels=None, color=BLUE, cmap=None, label=None, clabel=True, clabel_kwargs=None, **kwargs):
+def plt_contour(ax, x, y, z, levels=None, color=BLUE, cmap=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, label=None, label_cmap_float=1.0, clabel=True, clabel_kwargs=None, cbar=None, cbar_kwargs=None, **kwargs):
     '''
     使用x, y坐标网格和对应的z值绘制等高线图。
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -4495,24 +4590,43 @@ def plt_contour(ax, x, y, z, levels=None, color=BLUE, cmap=None, label=None, cla
     :param z: 在每个(x, y)坐标点上的z值。
     :param levels: 等高线的数量或具体的等高线级别列表，默认为自动确定。
     :param color: 等高线的颜色，默认为BLUE。
-    :param cmap: 等高线的颜色映射表，默认为None。
+    :param cmap: 等高线的颜色映射表，默认为None。如果指定了cmap，则不使用color，并默认添加颜色条。
     :param label: 如果不为None，添加一个颜色条并使用该标签。
+    :param label_cmap_float: 默认为1.0，用于指定标签的颜色。
+    :param clabel: 是否添加等高线标签，默认为True。
+    :param clabel_kwargs: 用于自定义等高线标签的参数，例如字体大小和颜色。
+    :param cbar: 是否添加颜色条，默认为True。
+    :param cbar_kwargs: 用于自定义颜色条的参数，例如位置和标签。
     :param kwargs: 其他plt.contour支持的参数。
     '''
     clabel_kwargs = update_dict(CLABEL_KWARGS, clabel_kwargs)
+    cbar_kwargs = update_dict({}, cbar_kwargs)
     # 如果指定了cmap，则不使用color
     if cmap is not None:
         colors = None
+        cbar = True
     else:
         colors = [color]
-    contour =  ax.contour(x, y, z, levels=levels, colors=colors, cmap=cmap, **kwargs)
+    if vmin is None:
+        vmin = np.nanmin(z)
+    if vmax is None:
+        vmax = np.nanmax(z)
+    
+    # 获取norm
+    norm = get_norm(vmin=vmin, vmax=vmax, norm_mode=norm_mode, norm_kwargs=norm_kwargs)
+
+    # 画图
+    contour =  ax.contour(x, y, z, levels=levels, colors=colors, cmap=cmap, norm=norm, **kwargs)
     if clabel:
         plt.clabel(contour, **clabel_kwargs)
     if label is not None:
         if cmap is not None:
-            print('If use cmap, label will be ignored')
+            label_color = cmap(label_cmap_float)
+            plt_line(ax, [], [], label=label, color=label_color)
         else:
             plt_line(ax, [], [], label=label, color=color)
+    if cbar:
+        add_side_colorbar(ax, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, cmap=cmap, **cbar_kwargs)
     return contour
 
 
@@ -4532,8 +4646,7 @@ def plt_contourf(ax, x, y, z, levels=None, cmap=DENSITY_CMAP, contour=True, cont
     :param cbar_kwargs: 用于自定义颜色条的参数，例如位置和标签。
     :param kwargs: 其他plt.contourf支持的参数。
     '''
-    if cbar_kwargs is None:
-        cbar_kwargs = {}
+    cbar_kwargs = update_dict({}, cbar_kwargs)
     clabel_kwargs = update_dict(CLABEL_KWARGS, clabel_kwargs)
     contourf =  ax.contourf(x, y, z, levels=levels, cmap=cmap, **kwargs)
     if contour or clabel:
@@ -4624,8 +4737,7 @@ def plt_rectangle(ax, xy, width, height, color=BLUE, fill=True, adjust_lim=True,
     '''
     rectangle = plt.Rectangle(xy, width, height, color=color, fill=fill, **kwargs)
     if adjust_lim:
-        ax.set_xlim(xy[0], xy[0]+width)
-        ax.set_ylim(xy[1], xy[1]+height)
+        ax.scatter(xy[0], xy[1], s=0, zorder=-1)
     return ax.add_patch(rectangle)
 
 
@@ -4642,9 +4754,8 @@ def plt_polygon(ax, xy, color=BLUE, fill=True, adjust_lim=True, **kwargs):
     '''
     polygon = plt.Polygon(xy, color=color, fill=fill, **kwargs)
     if adjust_lim:
-        x, y = zip(*xy)
-        ax.set_xlim(np.nanmin(x), np.nanmax(x))
-        ax.set_ylim(np.nanmin(y), np.nanmax(y))
+        for sub_xy in xy:
+            ax.scatter(sub_xy[0], sub_xy[1], s=0, zorder=-1)
     return ax.add_patch(polygon)
 # endregion
 
@@ -4697,7 +4808,7 @@ def plt_bar_3d(ax, x, y, z, dx, dy, dz, label=None, color=BLUE, **kwargs):
     return ax.bar3d(x, y, z, dx, dy, dz, color=color, label=label, **kwargs)
 
 
-def plt_surface_3d(ax, x, y, z, label=None, color=BLUE, **kwargs):
+def plt_surface_3d(ax, x, y, z, label=None, color=BLUE, alpha=FAINT_ALPHA, **kwargs):
     '''
     使用x、y和z绘制3D曲面图,可以接受ax.plot_surface的其他参数
     :param ax: matplotlib的3D轴对象,用于绘制图形
@@ -4709,7 +4820,7 @@ def plt_surface_3d(ax, x, y, z, label=None, color=BLUE, **kwargs):
     :param kwargs: 其他ax.plot_surface支持的参数
     '''
     # 画图
-    return ax.plot_surface(x, y, z, label=label, color=color, **kwargs)
+    return ax.plot_surface(x, y, z, label=label, color=color, alpha=alpha, **kwargs)
 
 
 def plt_wireframe_3d(ax, X, Y, Z, rstride=BIN_NUM, cstride=BIN_NUM, color=BLUE, **kwargs):
@@ -4740,21 +4851,25 @@ def plt_voxel_3d(ax, data, label=None, color=BLUE, facecolors=None, edgecolors=N
     如果需要设置facecolors和edgecolors,请使用facecolors和edgecolors参数,并且把color参数设置为None,因为在这里color的优先级更高
     如果设置label的时候产生问题,建议设置label为None,另行添加图例
     '''
-    # 找到data中需要绘画的体素
-    idx = np.where(data)
-    # 防止得到过多的label
-    if len(idx[0]) > 1 and label is not None:
-        print_title("Warning: Too many labels in func 'plt_voxel_3d', please change the use of label to None or add legend manually.")
-        if color is not None:
-            return ax.voxels(data, color=color, label=None, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
-        else:
-            # 不明原因,但是如果color为None,仍然会绘画,所以这里不能输入color
-            return ax.voxels(data, label=None, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+    # # 找到data中需要绘画的体素
+    # idx = np.where(data)
+    # # 防止得到过多的label
+    # if len(idx[0]) > 1 and label is not None:
+    #     print_title("Warning: Too many labels in func 'plt_voxel_3d', please change the use of label to None or add legend manually.")
+    #     if color is not None:
+    #         return ax.voxels(data, color=color, label=None, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+    #     else:
+    #         # 不明原因,但是如果color为None,仍然会绘画,所以这里不能输入color
+    #         return ax.voxels(data, label=None, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+    # else:
+    #     if color is not None:
+    #         return ax.voxels(data, color=color, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+    #     else:
+    #         return ax.voxels(data, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+    if color is not None:
+        return ax.voxels(data, color=color, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
     else:
-        if color is not None:
-            return ax.voxels(data, color=color, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
-        else:
-            return ax.voxels(data, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
+        return ax.voxels(data, label=label, facecolors=facecolors, edgecolors=edgecolors, **kwargs)
 
 
 def plt_stem_3d(ax, x, y, z, label=None, linefmt='-', markerfmt='o', basefmt='k-', **kwargs):
@@ -5013,7 +5128,7 @@ def sns_box_pd(ax, data, x, y, color=BLUE, orient='v', **kwargs):
 
 
 # region 初级作图函数(sns系列,可同时接受矩阵和dataframe)
-def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_position=None, cbar_label=None, discrete=False, discrete_num=None, discrete_label=None, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTATION, show_xtick=True, show_ytick=True, show_all_xtick=True, show_all_ytick=True, xtick_fontsize=TICK_SIZE, ytick_fontsize=TICK_SIZE, mask=None, mask_color=MASK_COLOR, mask_tick='mask', vmin=None, vmax=None, text_process=None, heatmap_kwargs=None, cbar_kwargs=None):
+def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_position=None, cbar_label=None, discrete_label=None, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTATION, show_xtick=True, show_ytick=True, show_all_xtick=True, show_all_ytick=True, xtick_fontsize=TICK_SIZE, ytick_fontsize=TICK_SIZE, mask=None, mask_color=MASK_COLOR, mask_tick='mask', norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, heatmap_kwargs=None, cbar_kwargs=None):
     '''
     使用数据绘制热图,可以接受sns.heatmap的其他参数;注意,如果要让heatmap按照ax的框架显示,需要将square设置为False(如果想要mask是透明的,需要将mask_color设置为None)
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -5049,6 +5164,10 @@ def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_positi
         local_data = pd.DataFrame(data)
     else:
         local_data = data.copy()
+    if isinstance(mask, np.ndarray):
+        mask = pd.DataFrame(mask)
+    elif mask is not None:
+        mask = mask.copy()
     if mask_color is None:
         local_data = np.where(mask, np.nan, data)
         print('mask color is none need to be imporved')
@@ -5064,27 +5183,24 @@ def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_positi
         heatmap_kwargs = {}
     cbar_position = update_dict(CBAR_POSITION, cbar_position)
 
-    discrete_num, discrete_label = set_discrete_cmap_param(
-        discrete, discrete_num, discrete_label)
-    if discrete:
-        cmap = discretize_cmap(cmap, discrete_num)
-
+    # 获取norm
+    norm = get_norm(vmin=vmin, vmax=vmax, norm_mode=norm_mode, norm_kwargs=norm_kwargs)
 
     # 绘制热图
     if np.allclose(vmin, vmax):
         local_cmap = get_cmap([cmap(0.5), cmap(0.5)])
         sns.heatmap(local_data, ax=ax, cmap=local_cmap,
-                    square=square, cbar=False, vmin=vmin, vmax=vmax, **heatmap_kwargs)
+                    square=square, cbar=False, norm=norm, **heatmap_kwargs)
     else:
         sns.heatmap(local_data, ax=ax, cmap=cmap,
-                    square=square, cbar=False, vmin=vmin, vmax=vmax, **heatmap_kwargs)
+                    square=square, cbar=False, norm=norm, **heatmap_kwargs)
 
     # 绘制mask矩阵
     if mask is not None and mask_color is not None:
         use_mask = True
         mask_cmap = get_cmap([mask_color, mask_color])
         sns.heatmap(mask, ax=ax, cmap=mask_cmap,
-                    cbar=False, mask=mask, square=square)
+                    cbar=False, mask=~mask, square=square)
     else:
         use_mask = False
 
@@ -5115,7 +5231,7 @@ def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_positi
 
     # 显示颜色条
     if cbar:
-        cbars = add_side_colorbar(ax, mappable=None, cmap=cmap, cbar_position=cbar_position, cbar_label=cbar_label, vmin=vmin, vmax=vmax, discrete=discrete, discrete_num=discrete_num, discrete_label=discrete_label, use_mask=use_mask, mask_color=mask_color, mask_tick=mask_tick, **cbar_kwargs)
+        cbars = add_side_colorbar(ax, mappable=None, cmap=cmap, cbar_position=cbar_position, cbar_label=cbar_label, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, discrete_label=discrete_label, use_mask=use_mask, mask_color=mask_color, mask_tick=mask_tick, **cbar_kwargs)
         return cbars
 # endregion
 
@@ -5156,7 +5272,7 @@ def add_errorbar(ax, x, y, err, label=None, color=BLACK, linestyle='None', capsi
 # endregion
 
 
-# region 初级作图函数(添加ax)
+# region 初级作图函数(添加ax, zoom_in, twin_ax)
 def add_ax(fig, left, right, bottom, top, **kwargs):
     '''
     在指定位置添加一个新的ax。
@@ -5261,20 +5377,199 @@ def add_zoom_in_ax(ax, bounds, xlim, ylim, edgecolor=BLACK, **kwargs):
     '''
     # 创建新的ax
     zoom_in_ax = ax.inset_axes(bounds, xlim=xlim, ylim=ylim, xticklabels=[], yticklabels=[], **kwargs)
+
+    for location in ['top', 'right', 'bottom', 'left']:
+        # 保证zoom in的所有spine都在
+        zoom_in_ax.spines[location].set_visible(True)
+
+        # 设置zoom in的width使得美观
+        zoom_in_ax.spines[location].set_linewidth(AXES_LINEWIDTH/2)
+    
+    # 设置zoom in的tick
+    zoom_in_ax.xaxis.set_tick_params(width=TICK_MAJOR_WIDTH/2, length=TICK_MAJOR_SIZE/2, which='major')
+    zoom_in_ax.yaxis.set_tick_params(width=TICK_MAJOR_WIDTH/2, length=TICK_MAJOR_SIZE/2, which='major')
+    zoom_in_ax.xaxis.set_tick_params(width=TICK_MINOR_WIDTH/2, length=TICK_MINOR_SIZE/2, which='minor')
+    zoom_in_ax.yaxis.set_tick_params(width=TICK_MINOR_WIDTH/2, length=TICK_MINOR_SIZE/2, which='minor')
+
     # 绘制放大框
     ax.indicate_inset_zoom(zoom_in_ax, edgecolor=edgecolor)
     return zoom_in_ax
 
-@to_be_improved
-def add_span_zoom_in_ax(ax, bounds, xlim, ylim, edgecolor=BLACK, **kwargs):
-    '''
-    https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axes_zoom_effect.html#sphx-glr-gallery-subplots-axes-and-figures-axes-zoom-effect-py
-    '''
-    # 创建新的ax
-    zoom_in_ax = ax.inset_axes(bounds, xlim=xlim, ylim=ylim, xticklabels=[], yticklabels=[], **kwargs)
-    # 绘制放大框
-    ax.indicate_inset_zoom(zoom_in_ax, edgecolor=edgecolor)
-    return zoom_in_ax
+
+def zoom_in_xrange(ax, zoom_in_ax, xmin, xmax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
+    """
+    在主图上添加一个缩放框，并在缩放图上显示缩放区域。
+    
+    参数:
+    ax (Axes): 主图的 Axes 对象。
+    zoom_in_ax (Axes): 缩放图的 Axes 对象。
+    xmin (float): 缩放区域的最小 x 值。
+    xmax (float): 缩放区域的最大 x 值。
+    color (str): 缩放框的颜色。默认为绿色。
+    alpha (float): 缩放框的透明度。默认为淡色。
+    connection_mode (str): 连接线的方向。可以是 'up' 或 'down'。
+    """
+    # 获取ax和zoom_in_ax的position
+    ax_pos = ax.get_position()
+    zoom_in_ax_pos = zoom_in_ax.get_position()
+    
+    # 判断缩放图的位置
+    if zoom_in_ax_pos.y0 > ax_pos.y0:
+        connection_mode = 'up'
+    elif zoom_in_ax_pos.y0 < ax_pos.y0:
+        connection_mode = 'down'
+
+    # 设置缩放图的 x 轴和 y 轴范围
+    zoom_in_ax.set_xlim(xmin, xmax)
+    ymin, ymax = ax.get_ylim()
+    zoom_in_ax.set_ylim(ymin, ymax)
+    
+    # 在主图和缩放图上添加缩放框
+    add_vspan(ax=ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    add_vspan(ax=zoom_in_ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    
+    # 添加连接线
+    if connection_mode == 'up':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymax, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymax, yB=ymin)
+    elif connection_mode == 'down':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymin, yB=ymax)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymin, yB=ymax)
+    else:
+        raise ValueError('connection_mode must be either "up" or "down"')
+
+
+def zoom_in_xrange_partial(ax, zoom_in_ax, xmin, xmax, zoom_xmin, zoom_xmax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
+    """
+    在主图上添加一个缩放框，并在缩放图上显示缩放区域。(这里的缩放图不会占满整个图像)
+    
+    参数:
+    ax (Axes): 主图的 Axes 对象。
+    zoom_in_ax (Axes): 缩放图的 Axes 对象。
+    xmin (float): 缩放区域的最小 x 值。
+    xmax (float): 缩放区域的最大 x 值。
+    zoom_xmin (float): zoom_in_ax的最小 x 值。
+    zoom_xmax (float): zoom_in_ax的最大 x 值。
+    color (str): 缩放框的颜色。默认为绿色。
+    alpha (float): 缩放框的透明度。默认为淡色。
+    connection_mode (str): 连接线的方向。可以是 'up' 或 'down'。
+    """
+    # 获取ax和zoom_in_ax的position
+    ax_pos = ax.get_position()
+    zoom_in_ax_pos = zoom_in_ax.get_position()
+    
+    # 判断缩放图的位置
+    if zoom_in_ax_pos.y0 > ax_pos.y0:
+        connection_mode = 'up'
+    elif zoom_in_ax_pos.y0 < ax_pos.y0:
+        connection_mode = 'down'
+
+    # 设置缩放图的 x 轴和 y 轴范围
+    zoom_in_ax.set_xlim(zoom_xmin, zoom_xmax)
+    ymin, ymax = ax.get_ylim()
+    zoom_in_ax.set_ylim(ymin, ymax)
+    
+    # 在主图和缩放图上添加缩放框
+    add_vspan(ax=ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    add_vspan(ax=zoom_in_ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    
+    # 添加连接线
+    if connection_mode == 'up':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymax, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymax, yB=ymin)
+    elif connection_mode == 'down':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymin, yB=ymax)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymin, yB=ymax)
+    else:
+        raise ValueError('connection_mode must be either "up" or "down"')
+
+
+def zoom_in_yrange(ax, zoom_in_ax, ymin, ymax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
+    """
+    在主图上添加一个缩放框,并在缩放图上显示缩放区域。
+    
+    参数:
+    ax (Axes): 主图的 Axes 对象。
+    zoom_in_ax (Axes): 缩放图的 Axes 对象。
+    ymin (float): 缩放区域的最小 y 值。
+    ymax (float): 缩放区域的最大 y 值。
+    color (str): 缩放框的颜色。默认为绿色。
+    alpha (float): 缩放框的透明度。默认为淡色。
+    connection_mode (str): 连接线的方向。可以是 'left' 或 'right'。
+    """
+    # 获取ax和zoom_in_ax的position
+    ax_pos = ax.get_position()
+    zoom_in_ax_pos = zoom_in_ax.get_position()
+    
+    # 判断缩放图的位置
+    if zoom_in_ax_pos.x0 > ax_pos.x0:
+        connection_mode = 'right'
+    elif zoom_in_ax_pos.x0 < ax_pos.x0:
+        connection_mode = 'left'
+
+    # 设置缩放图的 x 轴和 y 轴范围
+    zoom_in_ax.set_ylim(ymin, ymax)
+    xmin, xmax = ax.get_xlim()
+    zoom_in_ax.set_xlim(xmin, xmax)
+    
+    # 在主图和缩放图上添加缩放框
+    add_hspan(ax=ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    add_hspan(ax=zoom_in_ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    
+    # 添加连接线
+    if connection_mode == 'left':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymin, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymax, yB=ymax)
+    elif connection_mode == 'right':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymin, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymax, yB=ymax)
+    else:
+        raise ValueError('connection_mode must be either "left" or "right"')
+
+
+def zoom_in_yrange_partial(ax, zoom_in_ax, ymin, ymax, zoom_ymin, zoom_ymax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
+    """
+    在主图上添加一个缩放框,并在缩放图上显示缩放区域。(这里的缩放图不会占满整个图像)
+    
+    参数:
+    ax (Axes): 主图的 Axes 对象。
+    zoom_in_ax (Axes): 缩放图的 Axes 对象。
+    ymin (float): 缩放区域的最小 y 值。
+    ymax (float): 缩放区域的最大 y 值。
+    zoom_ymin (float): zoom_in_ax的最小 y 值。
+    zoom_ymax (float): zoom_in_ax的最大 y 值。
+    color (str): 缩放框的颜色。默认为绿色。
+    alpha (float): 缩放框的透明度。默认为淡色。
+    connection_mode (str): 连接线的方向。可以是 'left' 或 'right'。
+    """
+    # 获取ax和zoom_in_ax的position
+    ax_pos = ax.get_position()
+    zoom_in_ax_pos = zoom_in_ax.get_position()
+    
+    # 判断缩放图的位置
+    if zoom_in_ax_pos.x0 > ax_pos.x0:
+        connection_mode = 'right'
+    elif zoom_in_ax_pos.x0 < ax_pos.x0:
+        connection_mode = 'left'
+
+    # 设置缩放图的 x 轴和 y 轴范围
+    zoom_in_ax.set_ylim(zoom_ymin, zoom_ymax)
+    xmin, xmax = ax.get_xlim()
+    zoom_in_ax.set_xlim(xmin, xmax)
+    
+    # 在主图和缩放图上添加缩放框
+    add_hspan(ax=ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    add_hspan(ax=zoom_in_ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    
+    # 添加连接线
+    if connection_mode == 'left':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymin, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymax, yB=ymax)
+    elif connection_mode == 'right':
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymin, yB=ymin)
+        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymax, yB=ymax)
+    else:
+        raise ValueError('connection_mode must be either "left" or "right"')
 
 
 def add_twin_ax(ax, axis):
@@ -5295,6 +5590,28 @@ def add_twin_ax(ax, axis):
         twin_ax = ax.twiny()
         twin_ax.set_position(ax.get_position())
         return twin_ax
+# endregion
+
+
+# region 初级作图函数(添加连接不同ax的线)
+def add_connection(axA, axB, xA, yA, xB, yB, coordsA='data', coordsB='data', **kwargs):
+    """
+    在两个子图之间绘制连接线。
+    
+    参数:
+    xA, yA (float): 起始点的 x, y 坐标
+    xB, yB (float): 终止点的 x, y 坐标
+    axA, axB (Axes): 起始点和终止点所在的子图
+    coordsA, coordsB (str): 坐标系,可以是'data', 'axes'或'figure'
+    **kwargs: ConnectionPatch 的其他参数,如 arrowstyle, shrinkA, shrinkB 等
+    """
+    # 创建 ConnectionPatch 对象
+    con = mpatches.ConnectionPatch(xyA=(xA, yA), xyB=(xB, yB),
+                         coordsA=coordsA, coordsB=coordsB,
+                         axesA=axA, axesB=axB, **kwargs)
+    
+    # 将 ConnectionPatch 添加到图形中
+    axA.figure.add_artist(con)
 # endregion
 
 
@@ -5603,6 +5920,98 @@ def get_extreme_ax_position(*args, position):
 # endregion
 
 
+# region 初级作图函数(formatter)
+
+# endregion
+
+
+# region 初级作图函数(norm)
+def get_norm(norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None):
+    '''
+    根据给定的模式创建一个matplotlib颜色规范化对象。
+
+    参数:
+    - norm_mode (str): 规范化模式。可以是'linear'、'log'、'symlog'、'two_slope'、'boundary'。
+    - vmin (float or None, optional): 规范化范围的最小值。
+    - vmax (float or None, optional): 规范化范围的最大值。
+    - norm_kwargs (dict or None, optional): 规范化函数的其他关键字参数。
+
+    返回:
+    - norm: 基于指定模式的matplotlib规范化对象。
+    '''
+    if norm_kwargs is None:
+        norm_kwargs = {}
+    if norm_mode == 'linear':
+        local_norm_kwargs = norm_kwargs.copy()
+        if vmin is None:
+            if 'vmin' not in local_norm_kwargs:
+                vmin = 0
+            else:
+                vmin = local_norm_kwargs.pop('vmin')
+        if vmax is None:
+            if 'vmax' not in local_norm_kwargs:
+                vmax = 1
+            else:
+                vmax = local_norm_kwargs.pop('vmax')
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax, **local_norm_kwargs)
+    elif norm_mode == 'log':
+        local_norm_kwargs = norm_kwargs.copy()
+        if vmin is None:
+            if 'vmin' not in local_norm_kwargs:
+                vmin = 1e-1
+            else:
+                vmin = local_norm_kwargs.pop('vmin')
+        if vmax is None:
+            if 'vmax' not in local_norm_kwargs:
+                vmax = 1
+            else:
+                vmax = local_norm_kwargs.pop('vmax')
+        norm = mcolors.LogNorm(vmin=vmin, vmax=vmax, **local_norm_kwargs)
+    elif norm_mode == 'symlog':
+        local_norm_kwargs = norm_kwargs.copy()
+        if vmin is None:
+            if 'vmin' not in local_norm_kwargs:
+                vmin = -10
+            else:
+                vmin = local_norm_kwargs.pop('vmin')
+        if vmax is None:
+            if 'vmax' not in local_norm_kwargs:
+                vmax = 10
+            else:
+                vmax = local_norm_kwargs.pop('vmax')
+        if 'linthresh' not in local_norm_kwargs:
+            linthresh = 1
+        else:
+            linthresh = local_norm_kwargs.pop('linthresh')
+        norm = mcolors.SymLogNorm(linthresh=linthresh, vmin=vmin, vmax=vmax, **local_norm_kwargs)
+    elif norm_mode == 'two_slope':
+        local_norm_kwargs = norm_kwargs.copy()
+        if vmin is None:
+            if 'vmin' not in local_norm_kwargs:
+                vmin = -1
+            else:
+                vmin = local_norm_kwargs.pop('vmin')
+        if vmax is None:
+            if 'vmax' not in local_norm_kwargs:
+                vmax = 1
+            else:
+                vmax = local_norm_kwargs.pop('vmax')
+        if 'vcenter' not in local_norm_kwargs:
+            vcenter = 0
+        else:
+            vcenter = local_norm_kwargs.pop('vcenter')
+        norm = mcolors.TwoSlopeNorm(vcenter=vcenter, vmin=vmin, vmax=vmax, **local_norm_kwargs)
+    elif norm_mode == 'boundary':
+        local_norm_kwargs = norm_kwargs.copy()
+        if 'boundaries' not in local_norm_kwargs:
+            local_norm_kwargs['boundaries'] = np.linspace(0, 1, 6, endpoint=True)
+        if 'ncolors' not in local_norm_kwargs:
+            local_norm_kwargs['ncolors'] = 256
+        norm = mcolors.BoundaryNorm(**local_norm_kwargs)
+    return norm
+# endregion
+
+
 # region 初级作图函数(cmap)
 def get_cmap(colors, continuous=True):
     '''
@@ -5616,7 +6025,7 @@ def get_cmap(colors, continuous=True):
         cmap = mcolors.ListedColormap(colors)
     return cmap
 
-
+@message_decorator('use norm in plt instead')
 def scale_cmap(cmap, vmin, vmax):
     '''
     缩放颜色映射。
@@ -5637,7 +6046,7 @@ def reverse_cmap(cmap, continuous=True):
     color_data = cmap(np.linspace(0, 1, cmap.N))
     return get_cmap(color_data[::-1], continuous=continuous)
 
-
+@message_decorator('use boundary norm in plt instead')
 def discretize_cmap(cmap, discrete_num):
     '''
     将连续颜色条转换为离散颜色条。
@@ -5651,6 +6060,7 @@ def discretize_cmap(cmap, discrete_num):
 
 
 # region 初级作图函数(添加colorbar)
+@deprecated
 def set_discrete_cmap_param(discrete, discrete_num, discrete_label):
     if discrete:
         if discrete_label is not None and discrete_num is not None:
@@ -5668,9 +6078,9 @@ def set_discrete_cmap_param(discrete, discrete_num, discrete_label):
     return discrete_num, discrete_label
 
 
-def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discrete=False, discrete_num=None, discrete_label=None, display_edge_ticks=True, display_center_ticks=False, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vmin=None, vmax=None, text_process=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
+def add_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
     '''
-    在指定ax添加颜色条。特别注意，对于离散的cmap，用户一定要提供对应的discrete_num; 另外,如果输入了mappable的同时指定了vmin和vmax,则会按照vmin,vmax来clip这个mappable的范围。
+    在指定ax添加颜色条。目前设置norm_mode为'boundary'时，最好输入一个离散的cmap，否则在log模式下会出现问题。
     :param ax: matplotlib的轴对象，用于绘制图形。
     :param mappable: 用于绘制颜色条的对象，默认为None。
     :param cmap: 颜色条的颜色映射，默认为CMAP。可以是离散的或连续的，须与discrete参数相符合。
@@ -5678,8 +6088,7 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
     :param discrete: 是否为离散颜色条，默认为False。
     :param discrete_num: 离散颜色条的数量，默认为5。
     :param discrete_label: 离散颜色条的标签，默认为None。
-    :param display_edge_ticks: 是否显示颜色条的边缘刻度，默认为True。(只在离散颜色条下有效)
-    :param display_center_ticks: 是否显示颜色条的中心刻度，默认为False。(只在离散颜色条下有效,并且假如discrete_label被设置了,即使display_center_ticks为True,也不会显示中心刻度)
+    :param display_edge_ticks: 是否显示颜色条的边缘刻度，默认为True。(只在norm_mode为'boundary'时并且discrete_label不为None时有效)
     :param cbar_position: 颜色条的位置，默认为None,即使用默认位置;position参数可选'left', 'right', 'top', 'bottom'
     :param cbar_label: 颜色条的标签，默认为None。
     :param use_mask: 是否使用mask颜色条，默认为False。
@@ -5693,21 +6102,20 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
     :param adjust_tick_size: 是否根据颜色条的数量自动调整刻度标签的大小，默认为True。
     :param tick_proportion: 调整时的比例，默认为TICK_PROPORTION。
     :param label_kwargs: 颜色条标签的其他参数，默认为None。
+    :param norm_mode: 颜色条的归一化模式，默认为'linear'。可选'linear', 'log', 'symlog', 'twoslope'.
     :param vmin: 颜色条的最小值，默认为None。
     :param vmax: 颜色条的最大值，默认为None。
+    :param norm_kwargs: 归一化的其他参数，默认为None。具体会根据不同的norm_mode在内部设置默认值。
     :param text_process: 文本处理函数，默认为TEXT_PROCESS。
     :param round_digits: 刻度标签的小数位数，默认为ROUND_DIGITS。
     :param add_leq: 是否在最小值处添加'<=',默认为False。
     :param add_geq: 是否在最大值处添加'>=',默认为False。
     '''
-    discrete_num, discrete_label = set_discrete_cmap_param(
-        discrete, discrete_num, discrete_label)
-    if discrete:
-        cmap = discretize_cmap(cmap, discrete_num)
-
+    # 设定默认参数
+    norm_kwargs = update_dict({}, norm_kwargs)
     if mappable is None:
-        # 创建一个默认的ScalarMappable对象，这里使用默认的颜色映射和一个简单的线性规范
-        norm = Normalize(vmin=vmin or 0, vmax=vmax or 1)  # 假定默认的数据范围为0到1
+        # 根据norm_mode设置norm
+        norm = get_norm(norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
         mappable = ScalarMappable(norm=norm, cmap=cmap)
     if label_kwargs is None:
         label_kwargs = {}
@@ -5716,36 +6124,48 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
     if vmax is None:
         vmax = mappable.norm.vmax
 
-    mappable.set_clim(vmin, vmax)
-
-    text_process = update_dict(TEXT_PROCESS, text_process)
-
-    if mask_cbar_ratio is None:
-        if discrete:
-            mask_cbar_ratio = 1/(discrete_num+1)
-        else:
-            mask_cbar_ratio = 0.2
-
-    cbar_label = format_text(cbar_label, text_process=text_process)
-    mask_tick = format_text(mask_tick, text_process=text_process)
-    if discrete_label is not None:
-        discrete_label = [format_text(
-            label, text_process=text_process) for label in discrete_label]
-
     # 更新默认值
     cbar_position = update_dict(CBAR_POSITION, cbar_position)
+    text_process = update_dict(TEXT_PROCESS, text_process)
 
+    # 根据vmin和vmax来clip这个mappable的范围
+    mappable.set_clim(vmin, vmax)
+
+    # 设置mask_cbar_ratio
+    if mask_cbar_ratio is None:
+        mask_cbar_ratio = 0.2
+        if norm_mode == 'boundary':
+            mask_cbar_ratio = 1/mappable.norm.boundaries.size
+
+    # 格式化cbar_label和mask_tick
+    cbar_label = format_text(cbar_label, text_process=text_process)
+    mask_tick = format_text(mask_tick, text_process=text_process)
+
+    # 格式化discrete_label
+    if discrete_label is not None:
+        discrete_label = [format_text(label, text_process=text_process) for label in discrete_label]
+
+    # 获得orientation
     if cbar_position['position'] in ['right', 'left']:
         orientation = 'vertical'
     if cbar_position['position'] in ['top', 'bottom']:
         orientation = 'horizontal'
 
-
+    # 获取cbar_ax和mask_ax
     if use_mask:
         if cbar_position['position'] in ['right', 'left']:
-            cbar_ax, mask_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=1-mask_cbar_ratio)
+            if mask_pos == 'start':
+                cbar_ax, mask_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=1-mask_cbar_ratio)
+            if mask_pos == 'end':
+                mask_ax, cbar_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=mask_cbar_ratio)
         if cbar_position['position'] in ['top', 'bottom']:
-            mask_ax, cbar_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=mask_cbar_ratio)
+            if mask_pos == 'start':
+                mask_ax, cbar_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=mask_cbar_ratio)
+            if mask_pos == 'end':
+                cbar_ax, mask_ax = split_ax(ax, orientation=orientation, pad=mask_pad, ratio=1-mask_cbar_ratio)
+
+        # 去掉ax的坐标轴
+        ax.axis('off')
 
         # 创建一个ScalarMappable对象，使用一个简单的颜色映射和Normalize对象,因为我们要显示一个纯色的colorbar，所以颜色映射范围不重要，只需确保vmin和vmax不同即可
         norm = Normalize(vmin=0, vmax=1)
@@ -5754,62 +6174,13 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
         # 创建colorbar，将ScalarMappable作为输入
         mask_cbar = plt.colorbar(sm, cax=mask_ax, orientation=orientation)
 
-        # 去掉新ax的坐标轴
-        ax.axis('off')
-
         cbar = plt.colorbar(mappable, cax=cbar_ax, orientation=orientation)
     else:
         cbar = plt.colorbar(mappable, cax=ax, orientation=orientation)
 
-    # 设置colorbar的标签
-    cbar.set_label(cbar_label, fontsize=label_size, **label_kwargs)
-
-    # 假如颜色映射是一个离散的，则自动设置刻度和标签
-    if discrete:
-        if display_edge_ticks:
-            # 生成线性间隔的刻度
-            ticks = np.linspace(vmin, vmax, 2*discrete_num+1)
-            # 生成默认的刻度标签
-            tick_labels = [str(round_float(tick, round_digits, round_format_type)) for tick in ticks]
-
-            # 如果提供了 discrete_label，则替换相应的标签
-            if discrete_label is not None:
-                # 每隔一个刻度替换标签，跳过最开始和最末尾的刻度
-                tick_labels[1::2] = discrete_label  # 只替换 discrete_label 指定的位置
-            else:
-                if not display_center_ticks:
-                    # 生成线性间隔的刻度(不包含中心所以数量为discrete_num+1)
-                    ticks = np.linspace(vmin, vmax, discrete_num+1)
-                    # 生成默认的刻度标签
-                    tick_labels = [str(round_float(tick, round_digits, round_format_type)) for tick in ticks]
-        else:
-            # 生成线性间隔的刻度
-            ticks = np.linspace(vmin, vmax, 2*discrete_num+1)
-            ticks = ticks[1::2]
-            # 生成默认的刻度标签
-            tick_labels = [str(round_float(tick, round_digits, round_format_type)) for tick in ticks]
-
-            # 如果提供了 discrete_label，则替换相应的标签
-            if discrete_label is not None:
-                # 替换所有的标签
-                tick_labels = discrete_label
-            else:
-                if not display_center_ticks:
-                    # 如果不显示中心刻度，则将中心刻度的标签设置为空
-                    tick_labels = ['' for _ in range(len(tick_labels))]
-    else:
-        if continuous_tick_num is not None:
-            ticks = np.linspace(vmin, vmax, continuous_tick_num, endpoint=True)
-        else:
-            ticks = cbar.get_ticks()
-            # 得到ticks中位于vmin和vmax之间的刻度
-            ticks = ticks[(ticks >= vmin) & (ticks <= vmax)]
-        tick_labels = [str(round(tick, round_digits)) for tick in ticks]
-    
-    # 设置tick
-    cbar.set_ticks(ticks)
+    # 设置mask的刻度位置
     if use_mask:
-        if discrete and (not display_center_ticks) and (discrete_label is None) and display_edge_ticks:
+        if norm_mode == 'boundary' and discrete_label is None:
             mask_cbar.set_ticks([0.0])   # 设置刻度位置在最侧边
         else:
             mask_cbar.set_ticks([0.5])   # 设置刻度位置在正中间
@@ -5818,6 +6189,57 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
         if mask_tick_loc is not None:
             mask_cbar.set_ticks([mask_tick_loc])
 
+    # 设置colorbar的标签
+    cbar.set_label(cbar_label, fontsize=label_size, **label_kwargs)
+
+    # 假如颜色映射是一个离散的，则根据boundaries来设置ticks(假如输入了discrete_label,则插入中间刻度)
+    if norm_mode == 'boundary':
+        ticks = mappable.norm.boundaries
+        if discrete_label is not None:
+            ticks = insert_mid(ticks)
+            if not display_edge_ticks:
+                # 去掉边缘的刻度,只保留中间的刻度
+                ticks = ticks[1::2]
+    else:
+        ticks = cbar.get_ticks()
+        # 得到ticks中位于vmin和vmax之间的刻度
+        ticks = [tick for tick in ticks if vmin <= tick <= vmax]
+
+        # 当add_leq和add_geq为True时，强行添加末端的刻度
+        if add_leq:
+            if not np.allclose(vmin, ticks[0]):
+                ticks = [vmin] + ticks
+        if add_geq:
+            if not np.allclose(vmax, ticks[-1]):
+                ticks = ticks + [vmax]
+    
+    # 设置tick
+    cbar.set_ticks(ticks)
+    
+    # format cbar的刻度标签
+    if formatter is None:
+        if norm_mode == 'linear' or norm_mode == 'two_slope' or norm_mode == 'boundary':
+            tick_labels = [round_float(tick, round_digits, round_format_type) for tick in ticks]
+        elif norm_mode == 'log' or norm_mode == 'symlog':
+            tick_labels = [format_float_math_log(tick, round_digits) for tick in ticks]
+    else:
+        if formatter_kwargs is None:
+            formatter_kwargs = {}
+        tick_labels = [formatter(tick, **formatter_kwargs) for tick in ticks]
+
+    # 根据discrete_label进一步调整tick_labels
+    if norm_mode == 'boundary':
+        if discrete_label is not None:
+            if display_edge_ticks:
+                # 将tick_labels中间的刻度替换为discrete_label
+                for i in range(len(ticks)-1):
+                    if i % 2 == 1:
+                        tick_labels[i] = discrete_label[i//2]
+            else:
+                # 将tick_labels全部替换为discrete_label
+                tick_labels = discrete_label.copy()
+
+    # 调整tick_size
     if adjust_tick_size:
         num_ticks = len(cbar.get_ticks())
         width, height = get_ax_size(cbar.ax)
@@ -5860,6 +6282,12 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
             cb.ax.xaxis.set_ticks_position('bottom')
             cb.ax.set_xticks(cb.ax.get_xticks())
             cb.ax.set_xticklabels(cb.ax.get_xticklabels(), rotation=90)
+        # 将spine全部去掉
+        cb.outline.set_visible(False)
+
+        # 将minor ticks全部去掉
+        cb.ax.xaxis.set_tick_params(which='minor', length=0)
+        cb.ax.yaxis.set_tick_params(which='minor', length=0)
 
     # return cbar
     if use_mask:
@@ -5868,7 +6296,7 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discret
         return [cbar]
 
 
-def add_side_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, discrete=False, discrete_num=None, discrete_label=None, display_edge_ticks=True, display_center_ticks=False, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vmin=None, vmax=None, text_process=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
+def add_side_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
     '''
     在指定ax的旁边添加颜色条。特别注意，对于离散的cmap，用户一定要提供对应的discrete_num
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -5893,8 +6321,10 @@ def add_side_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, di
     :param adjust_tick_size: 是否根据颜色条的数量自动调整刻度标签的大小，默认为True。
     :param tick_proportion: 调整时的比例，默认为TICK_PROPORTION。
     :param label_kwargs: 颜色条标签的其他参数，默认为None。
+    :param norm_mode: 颜色条的归一化模式，默认为'linear'。可选'linear', 'log', 'symlog', 'twoslope'.
     :param vmin: 颜色条的最小值，默认为None。
     :param vmax: 颜色条的最大值，默认为None。
+    :param norm_kwargs: 归一化的其他参数，默认为None。具体会根据不同的norm_mode在内部设置默认值。
     :param text_process: 文本处理函数，默认为TEXT_PROCESS。
     :param round_digits: 刻度标签的小数位数，默认为ROUND_DIGITS。
     :param add_leq: 是否在最小值处添加'<=',默认为False。
@@ -5907,10 +6337,10 @@ def add_side_colorbar(ax, mappable=None, cmap=CMAP, continuous_tick_num=None, di
         cbar_position = update_dict(CBAR_POSITION, cbar_position)
 
     side_ax = add_side_ax(ax, cbar_position['position'], cbar_position['size'], cbar_position['pad'])
-    return add_colorbar(side_ax, mappable=mappable, cmap=cmap, continuous_tick_num=continuous_tick_num, discrete=discrete, discrete_num=discrete_num, discrete_label=discrete_label, display_edge_ticks=display_edge_ticks, display_center_ticks=display_center_ticks, cbar_position=cbar_position, cbar_label=cbar_label, use_mask=use_mask, mask_color=mask_color, mask_pad=mask_pad, mask_cbar_ratio=mask_cbar_ratio, mask_tick=mask_tick, mask_tick_loc=mask_tick_loc, label_size=label_size, tick_size=tick_size, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, vmin=vmin, vmax=vmax, text_process=text_process, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq)
+    return add_colorbar(side_ax, mappable=mappable, cmap=cmap, discrete_label=discrete_label, display_edge_ticks=display_edge_ticks, cbar_position=cbar_position, cbar_label=cbar_label, use_mask=use_mask, mask_color=mask_color, mask_pos=mask_pos, mask_pad=mask_pad, mask_cbar_ratio=mask_cbar_ratio, mask_tick=mask_tick, mask_tick_loc=mask_tick_loc, label_size=label_size, tick_size=tick_size, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, text_process=text_process, formatter=formatter, formatter_kwargs=formatter_kwargs, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq)
 
 
-def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMAP, edgecolor=BLACK, scatter_num=None, cbar_label=None, cbar_position=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, text_pad=1.0, label_pad=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vmin=None, vmax=None, text_process=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
+def add_scatter_colorbar(ax, mappable=None, cmap=CMAP, edgecolor=BLACK, tick_labels=None, cbar_label=None, cbar_position=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, text_pad=1.0, label_pad=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vnorm_mode='linear', vmin=None, vmax=None, vnorm_kwargs=None, snorm_mode='linear', smin=None, smax=None, snorm_kwargs=None, smap=partial(scale_to_new_range, old_min=0, old_max=1, new_min=0.05, new_max=0.95), use_mask=None, mask_marker='X', mask_smap_float=1.0, mask_color=MASK_COLOR, mask_text='mask', epsilon=1e-3, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
     '''
     在指定ax添加圆形颜色条。如果输入了mappable的同时指定了vmin和vmax,则会按照vmin,vmax来clip这个mappable的范围。
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -5919,7 +6349,7 @@ def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMA
     :param mappable: 用于绘制颜色条的对象，默认为None。
     :param cmap: 颜色条的颜色映射，默认为CMAP。
     :param edgecolor: 圆形颜色条的边缘颜色，默认为BLACK。
-    :param scatter_num: 圆形颜色条的数量，默认为5。
+    :param tick_labels: 颜色条的刻度标签，默认为None。
     :param cbar_label: 颜色条的标签，默认为None。
     :param cbar_position: 颜色条的位置，默认为None,即使用默认位置;position参数可选'left', 'right', 'top', 'bottom'
     :param label_size: 颜色条标签的字体大小，默认为CBAR_LABEL_SIZE。
@@ -5931,42 +6361,50 @@ def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMA
     :param label_kwargs: 颜色条标签的其他参数，默认为None。
     :param vmin: 颜色条的最小值，默认为None。
     :param vmax: 颜色条的最大值，默认为None。
+    :param vnorm_mode: 颜色条的归一化模式，默认为'linear'。可选'linear', 'log', 'symlog', 'twoslope'.
+    :param vnorm_kwargs: 归一化的其他参数，默认为None。具体会根据不同的norm_mode在内部设置默认值。
+    :param smin: 圆形颜色条的scatter的s的最小值，默认为None。
+    :param smax: 圆形颜色条的scatter的s的最大值，默认为None。
+    :param snorm_mode: 圆形颜色条的scatter的归一化模式，默认为'linear'。可选'linear', 'log', 'symlog', 'twoslope'.
+    :param snorm_kwargs: 圆形颜色条的scatter的归一化的其他参数，默认为None。具体会根据不同的norm_mode在内部设置默认值。
+    :param smap: 圆形颜色条的scatter的归一化函数，默认为partial(scale_to_new_range, old_min=0, old_max=1, new_min=0.05, new_max=0.95)。(自己用的时候可以修改new_min和new_max)
+    :param epsilon: 圆形颜色条的scatter为0时的半径，默认为1e-3。(会自动带入到smap中)
     :param text_process: 文本处理函数，默认为TEXT_PROCESS。
     :param round_digits: 刻度标签的小数位数，默认为ROUND_DIGITS。
     :param round_format_type: 刻度标签的格式，默认为ROUND_FORMAT。
     :param add_leq: 是否在最小值处添加'<=',默认为False。
     :param add_geq: 是否在最大值处添加'>=',默认为False。
     '''
-    if mappable is None:
-        # 创建一个默认的ScalarMappable对象，这里使用默认的颜色映射和一个简单的线性规范
-        norm = Normalize(vmin=vmin or 0, vmax=vmax or 1)  # 假定默认的数据范围为0到1
-        mappable = ScalarMappable(norm=norm, cmap=cmap)
-    if label_kwargs is None:
-        label_kwargs = {}
-    if vmin is None:
-        vmin = mappable.norm.vmin
-    if vmax is None:
-        vmax = mappable.norm.vmax
-
-    mappable.set_clim(vmin, vmax)
+    # 获取norm以更新vmin和vmax,smin和smax
+    cnorm = get_norm(vnorm_mode, vmin=vmin, vmax=vmax, norm_kwargs=vnorm_kwargs)
+    snorm = get_norm(snorm_mode, vmin=smin, vmax=smax, norm_kwargs=snorm_kwargs)
+    vmin, vmax = cnorm.vmin, cnorm.vmax
+    smin, smax = snorm.vmin, snorm.vmax
 
     # 更新默认值
     text_process = update_dict(TEXT_PROCESS, text_process)
     cbar_position = update_dict(CBAR_POSITION, cbar_position)
-    if scatter_num is None:
-        cbars = add_side_colorbar(ax, mappable=mappable, cmap=cmap, vmin=vmin, vmax=vmax, continuous_tick_num=scatter_num)
-        # 获取cbar的tick
-        ticks = cbars[0].get_ticks()
-        scatter_num = len(ticks)
+    label_kwargs = update_dict({}, label_kwargs)
+
+    # 由于cbar已经非常完善,这里调用cbar来获得需要的scatter的tick_labels(注意要输入smin等)
+    if tick_labels is None:
+        cbars = add_side_colorbar(ax, mappable=mappable, cmap=cmap, norm_mode=snorm_mode, vmin=smin, vmax=smax, norm_kwargs=snorm_kwargs, add_leq=add_leq, add_geq=add_geq, formatter=formatter, formatter_kwargs=formatter_kwargs, round_digits=round_digits, round_format_type=round_format_type)
+        # 获取cbar的tick_labels
+        tick_labels = cbars[0].ax.get_yticklabels()
+        tick_labels = [label.get_text() for label in tick_labels]
         # 删除cbar
         for cbar in cbars:
             ax.figure.delaxes(cbar.ax)
+    
+    # 通过tick_labels来获得scatter的数量
+    scatter_num = len(tick_labels)
 
     # 设置方向
     if cbar_position['position'] in ['right', 'left']:
         orientation = 'vertical'
     if cbar_position['position'] in ['top', 'bottom']:
         orientation = 'horizontal'
+
     # 调转方向
     if cbar_position['position'] == 'right':
         ax.yaxis.set_label_position('right')
@@ -5980,18 +6418,17 @@ def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMA
         elif orientation == 'horizontal':
             plt_size = get_ax_size(ax)[0]
         tick_size = suitable_tick_size(scatter_num, plt_size, tick_size, tick_proportion)
-    if label_pad is None:
-        text_length = [len(str(round_float(ticks[i], round_digits, round_format_type))) for i in range(scatter_num)]
-        label_pad = np.max(text_length) * tick_size
 
     # 添加圆形颜色条
-    radius_list = np.linspace(scatter_smin, scatter_smax, scatter_num, endpoint=True)
-    for i in range(scatter_num):
-        text = str(round_float(ticks[i], round_digits, round_format_type))
-        if add_leq and np.allclose(vmin, ticks[i]):
-            text = '≤' + text
-        if add_geq and np.allclose(vmax, ticks[i]):
-            text = '≥' + text
+    radius_list = smap(np.linspace(0, 1, scatter_num, endpoint=True))
+    color_list = cmap(np.linspace(0, 1, scatter_num, endpoint=True))
+    if np.allclose(mask_smap_float, 0.0):
+        mask_idx = -1
+    elif np.allclose(mask_smap_float, 1.0):
+        mask_idx = scatter_num
+    else:
+        print('have not implemented yet')
+    for i in list(range(scatter_num))+[mask_idx]:
         if orientation == 'vertical':
             center = (0.5, i)
             ax.set_xlim(0, 1)
@@ -6000,7 +6437,17 @@ def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMA
             center = (i, 0.5)
             ax.set_ylim(0, 1)
             ax.set_xlim(-1, scatter_num)
-        ax.scatter(center[0], center[1], s=radius_list[i], color=cmap(i/(scatter_num-1)), edgecolor=edgecolor, clip_on=False) # clip_on=False表示不裁剪,防止框太小圆被裁剪
+        if use_mask and i == mask_idx:
+            ax.scatter(center[0], center[1], s=smap(mask_smap_float), color=mask_color, edgecolor=edgecolor, marker=mask_marker, clip_on=False)
+        else:
+            pass
+        if i != mask_idx:
+            text = tick_labels[i]
+            ax.scatter(center[0], center[1], s=radius_list[i], color=color_list[i], edgecolor=edgecolor, clip_on=False) # clip_on=False表示不裁剪,防止框太小圆被裁剪
+            if radius_list[i] == 0:
+                ax.scatter(center[0], center[1], s=smap(epsilon), color=color_list[i], edgecolor=edgecolor, clip_on=False) # 稍微放大一点,防止点消失
+        else:
+            text = mask_text
         if cbar_position['position'] == 'right':
             add_text(ax, text=text, x=center[0]+text_pad, y=center[1], ha='left', va='center', fontsize=tick_size, color=edgecolor, transform='data', text_process=text_process, rotation=0)
         elif cbar_position['position'] == 'left':
@@ -6023,14 +6470,14 @@ def add_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMA
         ax.set_xlabel(cbar_label, fontsize=label_size, labelpad=label_pad, **label_kwargs)
 
 
-def add_side_scatter_colorbar(ax, scatter_smin, scatter_smax, mappable=None, cmap=CMAP, edgecolor=BLACK, scatter_num=None, cbar_label=None, cbar_position=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, text_pad=1.0, label_pad=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vmin=None, vmax=None, text_process=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
+def add_side_scatter_colorbar(ax, mappable=None, cmap=CMAP, edgecolor=BLACK, tick_labels=None, cbar_label=None, cbar_position=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, text_pad=1.0, label_pad=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vnorm_mode='linear', vmin=None, vmax=None, vnorm_kwargs=None, snorm_mode='linear', smin=None, smax=None, snorm_kwargs=None, smap=partial(scale_to_new_range, old_min=0, old_max=1, new_min=0.05, new_max=0.95), use_mask=None, mask_marker='X', mask_smap_float=1.0, mask_color=MASK_COLOR, mask_text='mask', epsilon=1e-3, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
     if isinstance(ax, Axes3D):
         cbar_position = update_dict(CBAR_POSITION_3D, cbar_position)
     else:
         cbar_position = update_dict(CBAR_POSITION, cbar_position)
 
     side_ax = add_side_ax(ax, cbar_position['position'], cbar_position['size'], cbar_position['pad'])
-    return add_scatter_colorbar(side_ax, scatter_smin, scatter_smax, mappable=mappable, cmap=cmap, edgecolor=edgecolor, scatter_num=scatter_num, cbar_label=cbar_label, cbar_position=cbar_position, label_size=label_size, tick_size=tick_size, text_pad=text_pad, label_pad=label_pad, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, vmin=vmin, vmax=vmax, text_process=text_process, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq)
+    return add_scatter_colorbar(side_ax, mappable=mappable, cmap=cmap, edgecolor=edgecolor, tick_labels=tick_labels, cbar_label=cbar_label, cbar_position=cbar_position, label_size=label_size, tick_size=tick_size, text_pad=text_pad, label_pad=label_pad, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, vnorm_mode=vnorm_mode, vmin=vmin, vmax=vmax, vnorm_kwargs=vnorm_kwargs, snorm_mode=snorm_mode, smin=smin, smax=smax, snorm_kwargs=snorm_kwargs, smap=smap, use_mask=use_mask, mask_marker=mask_marker, mask_smap_float=mask_smap_float, mask_color=mask_color, mask_text=mask_text, epsilon=epsilon, text_process=text_process, formatter=formatter, formatter_kwargs=formatter_kwargs, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq)
 # endregion
 
 
@@ -6078,10 +6525,11 @@ def add_marginal_distribution(ax, data, side_ax_position, side_ax_pad=SIDE_PAD, 
 
     # 隐藏边缘分布的刻度和坐标轴
     if rm_tick:
-        if split_orientation == 'horizontal':
-            rm_ax_tick(side_ax, 'x')
-        elif split_orientation == 'vertical':
-            rm_ax_tick(side_ax, 'y')
+        # if split_orientation == 'horizontal':
+        #     rm_ax_tick(side_ax, 'x')
+        # elif split_orientation == 'vertical':
+        #     rm_ax_tick(side_ax, 'y')
+        rm_ax_tick(side_ax)
     if rm_spine:
         rm_ax_spine(side_ax)
     if rm_axis:
@@ -6148,8 +6596,10 @@ def add_double_marginal_distribution(ax, x, y, outside=True, x_side_ax_position=
 
         # 隐藏边缘分布的刻度和坐标轴
         if rm_tick:
-            rm_ax_tick(x_side_ax, 'y')
-            rm_ax_tick(y_side_ax, 'x')
+            # rm_ax_tick(x_side_ax, 'y')
+            # rm_ax_tick(y_side_ax, 'x')
+            rm_ax_tick(x_side_ax)
+            rm_ax_tick(y_side_ax)
         if rm_spine:
             rm_ax_spine(x_side_ax)
             rm_ax_spine(y_side_ax)
@@ -6265,11 +6715,21 @@ def add_hline(ax, y, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, line
     return ax.axhline(y, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
 
 
-@to_be_improved
-def add_cross_line(ax, x, y, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
-    'https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axhspan_demo.html#sphx-glr-gallery-subplots-axes-and-figures-axhspan-demo-py'
-    'https://matplotlib.org/stable/gallery/pyplots/axline.html#sphx-glr-gallery-pyplots-axline-py'
-    pass
+def add_sline(ax, slope, intercept, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
+    '''
+    按照斜率和截距添加直线。(贯穿整个ax)
+
+    add_sline意为add_slope_line
+    :param ax: matplotlib的轴对象，用于绘制图形。
+    :param slope: 直线的斜率。
+    :param intercept: 直线的截距。
+    :param label: 直线的标签，默认为None。
+    :param color: 直线的颜色，默认为RED。
+    :param linestyle: 直线的线型，默认为AUXILIARY_LINE_STYLE。
+    :param linewidth: 直线的线宽，默认为LINE_WIDTH。
+    :param kwargs: 传递给`ax.axline`的额外关键字参数。
+    '''
+    return ax.axline((0, intercept), slope=slope, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
 
 
 def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
@@ -6293,10 +6753,20 @@ def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_
 
 
 # region 初级作图函数(添加span)
-@to_be_improved
-def add_vspan(ax, xmin, xmax, label=None, color=RED, alpha=0.3, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
-    'https://matplotlib.org/stable/gallery/subplots_axes_and_figures/axhspan_demo.html#sphx-glr-gallery-subplots-axes-and-figures-axhspan-demo-py'
-    pass
+def add_vspan(ax, xmin, xmax, label=None, color=GREEN, alpha=FAINT_ALPHA, **kwargs):
+    '''
+    在指定位置添加垂直跨度。
+    '''
+    # 画图
+    return ax.axvspan(xmin, xmax, label=label, color=color, alpha=alpha, **kwargs)
+
+
+def add_hspan(ax, ymin, ymax, label=None, color=GREEN, alpha=FAINT_ALPHA, **kwargs):
+    '''
+    在指定位置添加水平跨度。
+    '''
+    # 画图
+    return ax.axhspan(ymin, ymax, label=label, color=color, alpha=alpha, **kwargs)
 # endregion
 
 
@@ -6330,8 +6800,8 @@ def add_arrow(ax, x_start, y_start, x_end, y_end, xycoords='data', label=None, f
         add_annotation(ax, '', (x_end[i], y_end[i]), (x_start[i], y_start[i]), xycoords=xycoords, arrowprops={
                        'fc': fc, 'ec': ec, 'linewidth': linewidth, 'arrowstyle': arrow_sytle, 'head_length': head_length, 'head_width': head_width, 'alpha': alpha}, **kwargs)
 
-    # 为了添加label而使用的虚拟箭头,恰好arrow的特性是不会因为在那个点画了一个0长度的箭头而改变xy轴的范围
-    ax.arrow(0, 0, 0, 0, label=label, fc=fc, ec=ec,
+    # 为了添加label而使用的虚拟箭头
+    ax.arrow([], [], [], [], label=label, fc=fc, ec=ec,
              linewidth=linewidth, head_width=0, head_length=0, **kwargs)
 
 
@@ -6648,65 +7118,163 @@ def rm_legend(ax):
 
 
 # region 复杂作图函数(matplotlib系列,输入向量使用)
-def plt_edge_scatter(ax, x, y, color=BLUE, edge_color=BLACK, s=(MARKER_SIZE/2)**2*np.pi, edge_prop=1.1, label=None, density=False, edge_kwargs=None, scatter_kwargs=None):
+def plt_edge_scatter(ax, x, y, color=BLUE, edge_color=BLACK, s=MARKER_SIZE**2, edge_prop=1.1, label=None, density=False, edge_kwargs=None, sc_kwargs=None):
     '''
     绘制带边界的散点图。
-    :param ax: matplotlib的轴对象，用于绘制图形。
-    :param x: x轴的数据。
-    :param y: y轴的数据。
-    :param color: 散点的颜色，默认为BLUE。
-    :param s: 散点的大小，默认为(MARKER_SIZE/2)**2*np.pi,这是因为plt.scatter的s参数是散点的面积,marker_size是散点的直径。
-    :param edge_color: 散点的边界颜色，默认为BLACK。
-    :param edge_prop: 散点的边界比例，默认为1.1。
-    :param label: 散点的标签，默认为None。
-    :param density: 是否绘制密度图，默认为False。
-    :param edge_kwargs: 传递给plt_scatter的其他参数。
-    :param scatter_kwargs: 传递给plt_density_scatter或者plt_scatter的其他参数，取决于是否使用density。
+
+    参数:
+    - ax (matplotlib.axes.Axes): matplotlib的轴对象，用于绘制图形。
+    - x (numpy.ndarray or list): x轴的数据。
+    - y (numpy.ndarray or list): y轴的数据。 
+    - color (str or tuple, optional): 散点的颜色，默认为BLUE。
+    - edge_color (str or tuple, optional): 散点的边界颜色，默认为BLACK。
+    - s (float, optional): 散点的大小，默认为MARKER_SIZE**2。
+    - edge_prop (float, optional): 散点的边界比例，默认为1.1。
+    - label (str or None, optional): 散点的标签，默认为None。
+    - density (bool, optional): 是否绘制密度图，默认为False。
+    - edge_kwargs (dict or None, optional): 传递给plt_scatter的其他参数。
+    - sc_kwargs (dict or None, optional): 传递给plt_density_scatter或者plt_scatter的其他参数，取决于是否使用density。
+
+    返回:
+    - matplotlib.collections.PathCollection or None: 如果density为True，则返回plt_density_scatter的返回值，否则返回plt_scatter的返回值。
     '''
+    # 设置默认参数
     if edge_kwargs is None:
         edge_kwargs = {}
-    if scatter_kwargs is None:
-        scatter_kwargs = {}
+    if sc_kwargs is None:
+        sc_kwargs = {}
 
-    edge_size = (np.sqrt(s / np.pi) * edge_prop)**2 * np.pi
+    # 绘制边界
+    edge_size = s * edge_prop
     plt_scatter(ax, x, y, color=edge_color, s=edge_size, **edge_kwargs)
+    
+    # 绘制散点
     if density:
-        return plt_density_scatter(ax, x, y, label=label, scatter_kwargs={'s': s}, **scatter_kwargs)
+        local_sc_kwargs = sc_kwargs.copy()
+        if 'scatter_kwargs' in sc_kwargs:
+            local_sc_kwargs['scatter_kwargs'] = update_dict(sc_kwargs['scatter_kwargs'], {'s': s})
+        else:
+            local_sc_kwargs = update_dict(sc_kwargs, {'scatter_kwargs': {'s': s}})
+        return plt_density_scatter(ax, x, y, label=label, **local_sc_kwargs)
     else:
-        return plt_scatter(ax, x, y, color=color, s=s, label=label, **scatter_kwargs)
+        local_sc_kwargs = update_dict(sc_kwargs, {'s': s})
+        return plt_scatter(ax, x, y, color=color, label=label, **local_sc_kwargs)
 
 
-def plt_colorful_scatter(ax, x, y, c, vmin=None, vmax=None, cmap=CMAP, s=(MARKER_SIZE/2)**2*np.pi, label=None, scatter_kwargs=None, cbar=True, cbar_postion=None, cbar_kwargs=None):
+def plt_colorful_scatter(ax, x, y, c, cmap=CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, s=MARKER_SIZE**2, label=None, label_cmap_float=1.0, scatter_kwargs=None, cbar=True, cbar_postion=None, cbar_kwargs=None):
     '''
     绘制颜色关于c值变化的散点图。
-    :param ax: matplotlib的轴对象，用于绘制图形。
-    :param x: x轴的数据。
-    :param y: y轴的数据。
-    :param c: 颜色的数据。
-    :param vmin: 颜色映射的最小值，默认为None。
-    :param vmax: 颜色映射的最大值，默认为None。
-    :param cmap: 颜色映射，默认为CMAP。
-    :param s: 散点的大小，默认为(MARKER_SIZE/2)**2*np.pi,这是因为plt.scatter的s参数是散点的面积,marker_size是散点的直径。
-    :param label: 散点的标签，默认为None。
-    :param scatter_kwargs: 传递给plt_scatter的其他参数。
-    :param cbar: 是否添加颜色条，默认为True。
-    :param cbar_postion: 颜色条的位置，默认为None。
-    :param cbar_kwargs: 传递给add_side_colorbar的其他参数。
+
+    参数:
+    - ax (matplotlib.axes.Axes): matplotlib的轴对象, 用于绘制图形。
+    - x (numpy.ndarray or list): x轴的数据。
+    - y (numpy.ndarray or list): y轴的数据。 
+    - c (numpy.ndarray or list): 颜色的数据。
+    - cmap (matplotlib.colors.Colormap, optional): 颜色映射, 默认为CMAP。
+    - norm_mode (str, optional): 颜色映射的规范化模式, 可选 'linear', 'log', 'symlog', 'two_slope'等, 默认为 'linear'
+    - vmin (float, optional): 颜色映射的最小值, 默认为None。
+    - vmax (float, optional): 颜色映射的最大值, 默认为None。
+    - norm_kwargs (dict or None, optional): 颜色映射规范化的其他参数
+    - s (float, optional): 散点的大小, 默认为MARKER_SIZE**2。
+    - label (str or None, optional): 散点的标签, 默认为None。
+    - label_cmap_float (float, optional): 代表性点的颜色映射模式, 默认为1.0。如果输入整数则会raise ValueError。
+    - scatter_kwargs (dict or None, optional): 传递给plt_scatter的其他参数。
+    - cbar (bool, optional): 是否添加颜色条,默认为True。
+    - cbar_postion (str or None, optional): 颜色条的位置,默认为None。
+    - cbar_kwargs (dict or None, optional): 传递给add_side_colorbar的其他参数。
     '''
+    # 设置默认参数
     if scatter_kwargs is None:
         scatter_kwargs = {}
+    if cbar_kwargs is None:
+        cbar_kwargs = {}
     if vmin is None:
         vmin = np.nanmin(c)
     if vmax is None:
         vmax = np.nanmax(c)
-    if cbar_kwargs is None:
-        cbar_kwargs = {}
-    sc = plt_scatter(ax, x, y, color=None, c=c, cmap=cmap, s=s, vmin=vmin, vmax=vmax, label=label, **scatter_kwargs)
+
+    # 获取颜色映射的规范化对象
+    norm = get_norm(norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+
+    # 绘制散点(暂时设置label为None)
+    local_scatter_kwargs = update_dict(scatter_kwargs, {'s': s})
+    sc = plt_scatter(ax, x, y, color=None, c=c, cmap=cmap, label=None, norm=norm, **local_scatter_kwargs)
+
+    # 通过label_cmap_float来绘制代表性点并作出label
+    if isinstance(label_cmap_float, int):
+        print('warning: "label_cmap_float" is an integer, so it will be transformed to float')
+    ax.scatter([], [], color=cmap(float(label_cmap_float)), label=label, s=s)
+
+    # 添加颜色条
     if cbar:
-        cbars = add_side_colorbar(ax, sc, vmin=vmin, vmax=vmax, cmap=cmap, cbar_position=cbar_postion, **cbar_kwargs)
+        if vmin > np.nanmin(c):
+            cbar_kwargs['add_leq'] = True
+        if vmax < np.nanmax(c):
+            cbar_kwargs['add_geq'] = True
+        cbars = add_side_colorbar(ax, sc, vmin=vmin, vmax=vmax, norm_mode=norm_mode, norm_kwargs=norm_kwargs, cmap=cmap, cbar_position=cbar_postion, **cbar_kwargs)
         return sc, cbars
     else:
         return sc
+
+
+def plt_colorful_line(ax, x, y, c, cmap=CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_postion=None, cbar_kwargs=None, line_kwargs=None, adjust_lim=True):
+    '''
+    绘制颜色关于c值变化的线图。
+    
+    参数:
+    - ax (Axes): 绘图轴
+    - x (numpy.ndarray): x 坐标数据
+    - y (numpy.ndarray): y 坐标数据
+    - c (numpy.ndarray): 用于颜色映射的数据
+    - cmap (str, optional): 颜色映射方案, 默认为 CMAP
+    - norm_mode (str, optional): 颜色映射的规范化模式, 可选 'linear', 'log', 'symlog', 'two_slope'等, 默认为 'linear'
+    - vmin (float, optional): 颜色映射的最小值, 默认为 c 的最小值
+    - vmax (float, optional): 颜色映射的最大值, 默认为 c 的最大值
+    - norm_kwargs (dict, optional): 颜色映射规范化的其他参数
+    - cbar (bool, optional): 是否绘制颜色条, 默认为 True
+    - cbar_postion (str, optional): 颜色条的位置
+    - cbar_kwargs (dict, optional): 颜色条的其他参数
+    - line_kwargs (dict, optional): mcoll.LineCollection的其他参数
+    - adjust_lim (bool, optional): 是否调整坐标轴范围, 默认为 True
+    '''
+    # 设置默认参数
+    if cbar_kwargs is None:
+        cbar_kwargs = {}
+    if line_kwargs is None:
+        line_kwargs = {}
+
+    # 设置 vmin 和 vmax 的默认值
+    if vmin is None:
+        vmin = np.nanmin(c)
+    if vmax is None:
+        vmax = np.nanmax(c)
+
+    # 构建线条段
+    points = np.array([x, y]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+
+    # 获取颜色映射的规范化对象
+    norm = get_norm(norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+
+    # 创建 LineCollection 对象并设置属性
+    lc = mcoll.LineCollection(segments, cmap=cmap, norm=norm, **line_kwargs)
+    lc.set_array(c)
+    line = ax.add_collection(lc)
+
+    # 调整坐标轴范围
+    if adjust_lim:
+        ax.plot(x, y, linewidth=0)
+
+    # 添加颜色条
+    if cbar:
+        if vmin > np.nanmin(c):
+            cbar_kwargs['add_leq'] = True
+        if vmax < np.nanmax(c):
+            cbar_kwargs['add_geq'] = True
+        cbars = add_side_colorbar(ax, line, vmin=vmin, vmax=vmax, norm_mode=norm_mode, norm_kwargs=norm_kwargs, cmap=cmap, cbar_position=cbar_postion, **cbar_kwargs)
+        return line, cbars
+    else:
+        return line
 
 
 def plt_group_bar(ax, x, y, label_list=None, bar_width=None, colors=CMAP, vert=True, **kwargs):
@@ -6776,8 +7344,7 @@ def plt_group_box():
     pass
 
 
-def plt_linregress(ax, x, y, label=None, scatter_color=BLUE,
-                        line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None):
+def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True):
     '''
     使用线性回归结果绘制散点图和回归线,可以输入scatter的其他参数
 
@@ -6795,6 +7362,7 @@ def plt_linregress(ax, x, y, label=None, scatter_color=BLUE,
     show_corr_round - 相关系数小数点位数
     show_p - 是否显示 P 值
     show_p_round - P 值小数点位数
+    show_scatter - 是否显示散点
     '''
     if scatter_kwargs is None:
         scatter_kwargs = {}
@@ -6818,26 +7386,26 @@ def plt_linregress(ax, x, y, label=None, scatter_color=BLUE,
     regress_dict = get_linregress(x, y, **regress_kwargs)
 
     # 绘制散点图
-    plt_scatter(ax, x, y, color=scatter_color,
-                     label=label, **scatter_kwargs)
+    if show_scatter:
+        plt_scatter(ax, x, y, color=scatter_color,
+                        label=label, **scatter_kwargs)
 
     # 绘制回归线
-    plt_line(ax, x, x * regress_dict['slope'] +
-                  regress_dict['intercept'], color=line_color, **line_kwargs)
+    add_sline(ax, regress_dict['slope'], regress_dict['intercept'], color=line_color, **line_kwargs)
 
     add_linregress_text(ax, regress_dict, show_list=show_list,
                         round_digit_list=round_digit_list, round_format_list=round_format_list, fontsize=text_size, **text_kwargs)
     return regress_dict
 
 
-def plt_density_scatter(ax, x, y, label=None, label_cmap_index='max', estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
+def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
     '''
     绘制密度散点图。
     :param ax: matplotlib的轴对象,用于绘制图形
     :param x: x轴的数据
     :param y: y轴的数据
     :param label: 图例标签,默认为None
-    :param label_cmap_index: 图例颜色,默认为'max',使用密度最大的点作为代表
+    :param label_cmap_float: 图例颜色,默认为1.0
     :param estimate_type: 密度估计类型,默认为'kde',可选'hist'
     :param bw_method: 密度估计的带宽方法,默认为'auto'
     :param bins_x: x轴的bins,默认为BIN_NUM
@@ -6867,8 +7435,7 @@ def plt_density_scatter(ax, x, y, label=None, label_cmap_index='max', estimate_t
         line_kwargs = {}
     if text_kwargs is None:
         text_kwargs = {}
-    if cbar_kwargs is None:
-        cbar_kwargs = {}
+    cbar_kwargs = update_dict(cbar_kwargs, {'cbar_label': cbar_label})
     if regress_kwargs is None:
         regress_kwargs = {}
     cbar_position = update_dict(CBAR_POSITION, cbar_position)
@@ -6893,30 +7460,11 @@ def plt_density_scatter(ax, x, y, label=None, label_cmap_index='max', estimate_t
         iy = np.clip(iy, 0, hist.shape[1] - 1)
         z = hist[ix, iy]
 
-    # 选择代表性点
-    if label_cmap_index == 'max':
-        selected_index = np.argmax(z)
-    elif label_cmap_index == 'min':
-        selected_index = np.argmin(z)
-    elif label_cmap_index == 'median':
-        selected_index = np.argmin(np.abs(z - np.median(z)))
-
-    # 画出代表性点,这里要特别设定color参数为None,否则会和z的颜色和cmap冲突
-    local_z = get_min_max_scaling(z)
-    plt_scatter(ax, x_array[selected_index], y_array[selected_index], c=cmap(
-        local_z[selected_index]), label=label, color=None, **scatter_kwargs)
-
-    # 画出所有点,这里要特别设定color参数为None,否则会和z的颜色和cmap冲突
-    sc = plt_scatter(ax, x_array, y_array, c=z,
-                          cmap=cmap, color=None, **scatter_kwargs)
-
-    if cbar:
-        add_side_colorbar(ax, mappable=sc, cbar_label=cbar_label, **cbar_kwargs)
-
     if linregress:
-        # 设置scatter_color为透明,防止覆盖density
-        plt_linregress(ax, x_array, y_array, label=None, scatter_color='#FF573300',
-                            line_color=line_color, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs)
+        # 这里设置show_scatter为False,因为前面已经画了散点这里只需要线性拟合的线
+        plt_linregress(ax, x_array, y_array, label=None, line_color=line_color, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs, show_scatter=False)
+
+    return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
 
 
 def plt_marginal_density_scatter(ax, x, y, density_scatter_kwargs=None, marginal_kwargs=None):
@@ -7252,67 +7800,98 @@ def plt_xlog_bar(*args, **kwargs):
     print('如果要使用xlog的bar,建议先把x数据取好log后使用plt_bar')
 
 
-def plt_polygon_heatmap(ax, xy_dict, value_dict, vmin=None, vmax=None, cmap=CMAP, edgecolor=BLACK, cbar=True, cbar_position=None, cbar_label=None, fill=True, adjust_lim=True, polygon_kwargs=None, cbar_kwargs=None):
+def plt_polygon_heatmap(ax, xy_dict, value_dict, mask=None, mask_color=MASK_COLOR, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cmap=CMAP, edgecolor=BLACK, cbar=True, cbar_position=None, cbar_label=None, fill=True, adjust_lim=True, polygon_kwargs=None, cbar_kwargs=None):
     '''
-    在指定的轴上绘制多个区域。
-    :param ax: matplotlib的轴对象，用于绘制图形。
-    :param xy_dict: 包含多个区域的顶点坐标的字典。示例:xy_dict = {'region1': [(0, 0), (1, 1), (1, 0)], 'region2': [(1, 1), (2, 2), (2, 1)]}
-    :param value_dict: 包含多个区域的值的字典。示例:value_dict = {'region1': 1, 'region2': 2}
-    :param vmin: 区域值的最小值，默认为None。
-    :param vmax: 区域值的最大值，默认为None。
-    :param cmap: 区域值的颜色映射，默认为CMAP。
-    :param edge_color: 区域的边框颜色，默认为BLACK。
-    :param cbar: 是否显示颜色条，默认为True。
-    :param cbar_position: 颜色条的位置，默认为None。
-    :param cbar_label: 颜色条的标签，默认为None。
-    :param fill: 是否填充区域。(如果为False,则为区域的边框,这时可以通过linewidth参数控制边框宽度)
-    :param adjust_lim: 是否根据区域的位置和大小调整轴的限制。
-    :param polygon_kwargs: 传递给plt_polygon的额外关键字参数。
-    :param cbar_kwargs: 传递给add_side_colorbar的额外关键字参数。
+    绘制多边形热力图。
+
+    参数:
+    - ax (matplotlib.axes.Axes): matplotlib的轴对象，用于绘制图形。
+    - xy_dict (dict): 包含多个区域的顶点坐标的字典。示例: {'region1': [(0, 0), (1, 1), (1, 0)], 'region2': [(1, 1), (2, 2), (2, 1)]}
+    - value_dict (dict): 包含多个区域的值的字典。示例: {'region1': 1, 'region2': 2}
+    - norm_mode (str, optional): 归一化模式，默认为'linear'。
+    - vmin (float or None, optional): 区域值的最小值，默认为None。
+    - vmax (float or None, optional): 区域值的最大值，默认为None。
+    - norm_kwargs (dict or None, optional): 传递给get_norm的额外关键字参数。
+    - cmap (str or matplotlib.colors.Colormap, optional): 区域值的颜色映射，默认为CMAP。
+    - edgecolor (str or tuple, optional): 区域的边框颜色，默认为BLACK。
+    - cbar (bool, optional): 是否显示颜色条，默认为True。
+    - cbar_position (str or None, optional): 颜色条的位置，默认为None。
+    - cbar_label (str or None, optional): 颜色条的标签，默认为None。
+    - fill (bool, optional): 是否填充区域。(如果为False,则为区域的边框,这时可以通过linewidth参数控制边框宽度)
+    - adjust_lim (bool, optional): 是否根据区域的位置和大小调整轴的限制。
+    - polygon_kwargs (dict or None, optional): 传递给plt_polygon的额外关键字参数。
+    - cbar_kwargs (dict or None, optional): 传递给add_side_colorbar的额外关键字参数。
+
+    返回:
+    - add_side_colorbar的返回值，如果cbar为False，则返回None。
     '''
+    # 设置默认参数
     if vmin is None:
         vmin = np.nanmin(list(value_dict.values()))
     if vmax is None:
         vmax = np.nanmax(list(value_dict.values()))
     polygon_kwargs = update_dict({}, polygon_kwargs)
     cbar_kwargs = update_dict({}, cbar_kwargs)
-    scaled_cmap = scale_cmap(cmap, vmin=vmin, vmax=vmax)
+    
+    # 获取use_mask
+    if mask is None:
+        use_mask = False
+    else:
+        use_mask = True
+
+    # 得到norm
+    norm = get_norm(norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+
+    # 根据norm后的data值获取颜色
     for region, xy in xy_dict.items():
-        plt_polygon(ax, xy, color=None, facecolor=scaled_cmap(value_dict[region]), edgecolor=edgecolor, fill=fill, **polygon_kwargs)
-    if adjust_lim:
-        x, y = zip(*[point for xy in xy_dict.values() for point in xy])
-        ax.set_xlim(np.nanmin(x), np.nanmax(x))
-        ax.set_ylim(np.nanmin(y), np.nanmax(y))
+        if use_mask:
+            if mask[region]:
+                plt_polygon(ax, xy, color=None, facecolor=mask_color, edgecolor=edgecolor, fill=fill, adjust_lim=adjust_lim, **polygon_kwargs)
+            else:
+                plt_polygon(ax, xy, color=None, facecolor=cmap(norm(value_dict[region])), edgecolor=edgecolor, fill=fill, adjust_lim=adjust_lim, **polygon_kwargs)
+        else:
+            plt_polygon(ax, xy, color=None, facecolor=cmap(norm(value_dict[region])), edgecolor=edgecolor, fill=fill, adjust_lim=adjust_lim, **polygon_kwargs)
+        
+    # 添加colorbar
     if cbar:
         if vmin > np.nanmin(list(value_dict.values())):
             cbar_kwargs['add_leq'] = True
         if vmax < np.nanmax(list(value_dict.values())):
             cbar_kwargs['add_geq'] = True
-        return add_side_colorbar(ax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, **cbar_kwargs)
+        return add_side_colorbar(ax, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, cbar_label=cbar_label, cbar_position=cbar_position, use_mask=use_mask, mask_color=mask_color, **cbar_kwargs)
+
+
+def plt_advance_quiver(ax):
+    'https://matplotlib.org/stable/gallery/images_contours_and_fields/quiver_demo.html#sphx-glr-gallery-images-contours-and-fields-quiver-demo-py'
+    pass
 # endregion
 
 
 # region 复杂作图函数(matplotlib系列,三维作图)
-def plt_voxel_heatmap(ax, data, cmap=CMAP, vmin=None, vmax=None, edgecolors=BLACK, cbar=True, cbar_position=None, cbar_label=None, voxel_kwargs=None, cbar_kwargs=None):
-    """
-    根据data中的值和指定的颜色映射绘制体素图。
+def plt_voxel_heatmap(ax, data, cmap=CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, edgecolors=BLACK, cbar=True, cbar_position=None, cbar_label=None, mask=None, mask_color=MASK_COLOR, voxel_kwargs=None, cbar_kwargs=None):
+    '''
+    根据data中的值和指定的颜色映射绘制体素图。(data中的nan值将不会绘制,mask中的True值将会用mask_color绘制。)
     
     参数:
     - ax: matplotlib的Axes3D对象。
     - data: 三维numpy数组，其值将用来根据颜色映射确定颜色。(如果data中的值为nan,则不会绘制该体素。)
     - cmap: 颜色映射，默认为CMAP。
+    - norm_mode: 归一化模式，默认为'linear'。
     - vmin: 颜色映射的最小值，默认为None。
     - vmax: 颜色映射的最大值，默认为None。
+    - norm_kwargs: 传递给get_norm的额外关键字参数。
     - edgecolors: 体素的边框颜色，默认为BLACK。
     - cbar: 是否添加颜色条，默认为True。
     - cbar_position: 颜色条的位置，默认为None。
     - cbar_label: 颜色条的标签，默认为None。
+    - mask: 三维numpy数组，其True值将用mask_color绘制。(如果mask为None,则不会绘制mask。)
+    - mask_color: mask的颜色，默认为MASK_COLOR。
     - voxel_kwargs: 传递给plt_voxel_3d的额外关键字参数。
     - cbar_kwargs: 传递给add_side_colorbar的额外关键字参数。
 
     注意:
-    如果想要呈现无边框的效果，可以将edgecolors设置为None。
-    """
+    - 如果想要呈现无边框的效果，可以将edgecolors设置为None。
+    '''
     # 设置默认参数
     cbar_position = update_dict(CBAR_POSITION_3D, cbar_position)
     voxel_kwargs = update_dict({}, voxel_kwargs)
@@ -7326,24 +7905,36 @@ def plt_voxel_heatmap(ax, data, cmap=CMAP, vmin=None, vmax=None, edgecolors=BLAC
     elif vmax < np.nanmax(data):
         cbar_kwargs['add_geq'] = True
     
+    # 获取norm
+    norm = get_norm(norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+
     # 根据归一化后的data值获取颜色
-    facecolors = scale_cmap(cmap, vmin=vmin, vmax=vmax)(data)
+    facecolors = cmap(norm(data))
     
     # 绘制体素
     show_data = ~np.isnan(data)
     v = plt_voxel_3d(ax, show_data, color=None, facecolors=facecolors, edgecolors=edgecolors, **voxel_kwargs)
+    vs = [v]
+
+    # 绘制mask
+    if mask is not None:
+        use_mask = True
+        mask_v = plt_voxel_3d(ax, mask, color=None, facecolors=mask_color, edgecolors=edgecolors, **voxel_kwargs)
+        vs.append(mask_v)
+    else:
+        use_mask = False
 
     # 添加colorbar
     if cbar:
-        cbars = add_side_colorbar(ax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, **cbar_kwargs)
-        return v, cbars
+        cbars = add_side_colorbar(ax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, use_mask=use_mask, mask_color=mask_color, **cbar_kwargs)
+        return vs, cbars
     else:
-        return v
+        return vs
 # endregion
 
 
 # region 复杂作图函数(matplotlib系列,输入dataframe使用)
-def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=RANA, vmin=None, vmax=None, smin=None, smax=None, rel_smin=0.1, rel_smax=0.4, add_cbar=True, cbar_position=None, cbar_label=None, size_label=None, align_label_coord=4, grid_kwargs=None, scatter_kwargs=None, cbar_kwargs=None, scatter_cbar_kwargs=None):
+def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=RANA, vnorm_mode='linear', vmin=None, vmax=None, vnorm_kwargs=None, snorm_mode='linear', smin=None, smax=None, snorm_kwargs=None, rel_smap=partial(scale_to_new_range, old_min=0, old_max=1, new_min=0.05, new_max=0.95), smask=None, smask_marker='X', smask_smap_float=1.0, smask_text='mask', cmask=None, cmask_color=MASK_COLOR, cmask_text='mask', add_cbar=True, cbar_position=None, cbar_label=None, size_label=None, align_label_coord=4, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTATION, show_xtick=True, show_ytick=True, show_all_xtick=True, show_all_ytick=True, xtick_fontsize=TICK_SIZE, ytick_fontsize=TICK_SIZE, grid_kwargs=None, scatter_kwargs=None, cbar_kwargs=None, scatter_cbar_kwargs=None):
     '''
     使用DataFrame绘制圆形热图
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -7355,8 +7946,7 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
     :param vmax: 颜色映射的最大值,默认为None
     :param smin: 大小映射的最小值,默认为None
     :param smax: 大小映射的最大值,默认为None
-    :param rel_smin: 相对大小的最小值,默认为0.1
-    :param rel_smax: 相对大小的最大值,默认为0.4(因为按照整数的格子排列,半径为0.5是上限,所以0.4是合适的上限)
+    :param rel_smap: normalize后的值映射到相对大小(相对大小)
     :param add_cbar: 是否添加颜色条,默认为True
     :param cbar_position: 颜色条的位置,默认为None
     :param cbar_label: 颜色条的标签,默认为None
@@ -7372,12 +7962,35 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
     scatter_kwargs = update_dict({}, scatter_kwargs)
     cbar_kwargs = update_dict({}, cbar_kwargs)
     scatter_cbar_kwargs = update_dict({}, scatter_cbar_kwargs)
+    snorm_kwargs = update_dict({'clip': True}, snorm_kwargs) # 默认clip=True,不然如果产生负的size会报错
 
     # 将数据转换为dataframe
-    if not isinstance(color_data, pd.DataFrame):
+    if isinstance(color_data, np.ndarray):
         color_data = pd.DataFrame(color_data)
-    if not isinstance(size_data, pd.DataFrame):
+    else:
+        color_data = color_data.copy()
+    if isinstance(size_data, np.ndarray):
         size_data = pd.DataFrame(size_data)
+    else:
+        size_data = size_data.copy()
+    if isinstance(smask, np.ndarray):
+        smask = pd.DataFrame(smask)
+    elif smask is not None:
+        smask = smask.copy()
+    if isinstance(cmask, np.ndarray):
+        cmask = pd.DataFrame(cmask)
+    elif cmask is not None:
+        cmask = cmask.copy()
+
+    # 设定use_mask
+    if smask is not None:
+        use_smask = True
+    else:
+        use_smask = False
+    if cmask is not None:
+        use_cmask = True
+    else:
+        use_cmask = False
 
     # 更新vmin,vmax,smin,smax
     if vmin is None:
@@ -7396,34 +8009,68 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
         smax = np.nanmax(size_data.values)
     elif smax < np.nanmax(size_data.values):
         scatter_cbar_kwargs['add_geq'] = True
-    
-    # 对color_data作截断与归一化
-    color_data = clip_normalize(color_data, vmin, vmax)
 
-    # 对size作截断
-    size_data = size_data.clip(smin, smax)
+    # 画出棋盘格
+    add_grid(ax, range(len(color_data.columns)), range(len(color_data.index)), color=edgecolor, zorder=0, **grid_kwargs)
+    ax.set_xlim(-1, len(color_data.columns))
+    ax.set_ylim(-1, len(color_data.index))
 
-    # 获得ax的width和height
-    width, height = get_ax_size(ax)
-    ax_inch = np.min([width, height])
+    # 设定tick和ticklabel
+    if show_xtick:
+        if show_all_xtick:
+            ax.set_xticks(np.arange(len(color_data.columns)))
+            ax.set_xticklabels(
+                color_data.columns, rotation=xtick_rotation, fontsize=xtick_fontsize)
+        else:
+            ax.set_xticklabels(ax.get_xticklabels(),
+                               rotation=xtick_rotation, fontsize=xtick_fontsize)
+        ax.xaxis.set_tick_params(labelbottom=show_xtick)
+    else:
+        ax.set_xticks([])
 
-    # 获得scatter的size
-    scatter_smin = (inch_to_point(ax_inch) / np.max([len(size_data.columns), len(size_data.index)]) * rel_smin) ** 2 * np.pi
-    scatter_smax = (inch_to_point(ax_inch) / np.max([len(size_data.columns), len(size_data.index)]) * rel_smax) ** 2 * np.pi
-    scatter_size_data = get_min_max_scaling_df(size_data, min_val=scatter_smin, max_val=scatter_smax)
+    if show_ytick:
+        if show_all_ytick:
+            ax.set_yticks(np.arange(len(color_data.index)))
+            ax.set_yticklabels(
+                color_data.index, rotation=ytick_rotation, fontsize=ytick_fontsize)
+        else:
+            ax.set_yticklabels(ax.get_yticklabels(),
+                               rotation=ytick_rotation, fontsize=ytick_fontsize)
+        ax.yaxis.set_tick_params(labelleft=show_ytick)
+    else:
+        ax.set_yticks([])
+
+    # 计算datalim意义的1对应的radius的大小
+    ax_width, ax_height = get_ax_size(ax)
+    radius_width = ax_width / len(color_data.columns) / 2
+    radius_height = ax_height / len(color_data.index) / 2
+    radius = inch_to_point(min(radius_width, radius_height))
+
+    # 获取smap
+    def smap(x):
+        return rel_smap(x) * radius**2 * np.pi
+
+    # 获取norm
+    cnorm = get_norm(vnorm_mode, vmin=vmin, vmax=vmax, norm_kwargs=vnorm_kwargs)
+    snorm = get_norm(snorm_mode, vmin=smin, vmax=smax, norm_kwargs=snorm_kwargs)
 
     # 将y轴翻转(这样可以让矩阵的0,0在左上角)
     ax.invert_yaxis()
 
-    # 画出棋盘格
-    add_grid(ax, range(len(color_data.columns)), range(len(color_data.index)), color=edgecolor, zorder=0, **grid_kwargs)
-
     # 画出每个散点
     for row in color_data.index:
         for column in color_data.columns:
-            color = cmap(color_data.loc[row, column])
-            size = scatter_size_data.loc[row, column]
-            plt_scatter(ax, [column], [row], s=size, c=color, **scatter_kwargs)
+            marker = 'o'
+            color = cmap(cnorm(color_data.loc[row, column]))
+            size = smap(snorm(size_data.loc[row, column]))
+            if smask is not None:
+                if smask.loc[row, column]:
+                    marker = smask_marker
+                    size = smap(smask_smap_float)
+            if cmask is not None:
+                if cmask.loc[row, column]:
+                    color = cmask_color
+            plt_scatter(ax, [column], [row], s=size, c=color, marker=marker, **scatter_kwargs)
     
     # 获取side_ax
     side_ax = add_side_ax(ax, position=cbar_position['position'], relative_size=cbar_position['size'], pad=cbar_position['pad'])
@@ -7433,7 +8080,7 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
         if size_data.equals(color_data):
             if cbar_label is None and size_label is not None:
                 cbar_label = size_label
-            add_scatter_colorbar(side_ax, scatter_smin=scatter_smin, scatter_smax=scatter_smax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, **scatter_cbar_kwargs)
+            add_scatter_colorbar(side_ax, cmap=cmap, vnorm_mode=vnorm_mode, vmin=vmin, vmax=vmax, vnorm_kwargs=vnorm_kwargs, snorm_mode=snorm_mode, smin=smin, smax=smax, snorm_kwargs=snorm_kwargs, smap=smap, cbar_label=cbar_label, use_mask=use_smask, mask_marker=smask_marker, mask_smap_float=smask_smap_float, mask_text=smask_text, **scatter_cbar_kwargs)
         else:
             if cbar_position['position'] in ['top', 'bottom']:
                 split_orientation = 'horizontal'
@@ -7442,10 +8089,10 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
             size_side_ax, cbar_side_ax = split_ax(side_ax, orientation=split_orientation, ratio=0.5)
 
             # 添加颜色条
-            cbars = add_colorbar(cbar_side_ax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, **cbar_kwargs)
+            cbars = add_colorbar(cbar_side_ax, cmap=cmap, vmin=vmin, vmax=vmax, cbar_label=cbar_label, cbar_position=cbar_position, use_mask=use_cmask, mask_color=cmask_color, mask_tick=cmask_text, **cbar_kwargs)
 
             same_color_cmap = get_cmap([edgecolor, edgecolor]) # 生成一个只有一种颜色的cmap(因为这里只表达大小不表达颜色)
-            add_scatter_colorbar(size_side_ax, scatter_smin=scatter_smin, scatter_smax=scatter_smax, cmap=same_color_cmap, vmin=smin, vmax=smax, cbar_label=size_label, cbar_position=cbar_position, **scatter_cbar_kwargs)
+            add_scatter_colorbar(size_side_ax, cmap=same_color_cmap, smin=smin, smax=smax, snorm_mode=snorm_mode, snorm_kwargs=snorm_kwargs, smap=smap, cbar_label=size_label, use_mask=use_smask, mask_marker=smask_marker, mask_smap_float=smask_smap_float, mask_text=smask_text, **scatter_cbar_kwargs)
             align_label_manual([size_side_ax, cbar_side_ax], axis='y', label_coord=align_label_coord)
             return cbars
 
@@ -7578,7 +8225,7 @@ def sns_marginal_heatmap(ax, data, outside=True, x_side_ax_position='top', y_sid
     return x_side_ax, y_side_ax
 
 
-def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_cmap=CMAP, lower_cmap=CMAP, up_vmin=None, up_vmax=None, lower_vmin=None, lower_vmax=None, cbar=True, cbar_label=None, up_cbar_label='up', lower_cbar_label='lower', two_cbar_pad=0.2, cbar_position=None, heatmap_kwargs=None):
+def sns_triangle_heatmap(ax, up_data, lower_data, up_mask=None, lower_mask=None, up_mask_color=MASK_COLOR, lower_mask_color=MASK_COLOR, same_cmap=True, cmap=CMAP, up_cmap=CMAP, lower_cmap=CMAP, up_norm_mode='linear', up_vmin=None, up_vmax=None, up_norm_kwargs=None, lower_norm_mode='linear', lower_vmin=None, lower_vmax=None, lower_norm_kwargs=None, cbar=True, cbar_label=None, up_cbar_label='up', lower_cbar_label='lower', two_cbar_pad=0.2, cbar_position=None, heatmap_kwargs=None):
     '''
     绘制三角形热图
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -7591,6 +8238,17 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
     heatmap_kwargs['cbar_kwargs'] = update_dict({}, heatmap_kwargs.get('cbar_kwargs'))
     up_cbar_kwargs = update_dict({}, heatmap_kwargs.get('cbar_kwargs'))
     lower_cbar_kwargs = update_dict({}, heatmap_kwargs.get('cbar_kwargs'))
+
+    # 得到是否使用mask(注意区分此mask和tri_mask)
+    if up_mask is None:
+        up_use_mask = False
+    else:
+        up_use_mask = True
+    if lower_mask is None:
+        lower_use_mask = False
+    else:
+        lower_use_mask = True
+
     # 转换为dataframe
     if isinstance(up_data, np.ndarray):
         up_data = pd.DataFrame(up_data)
@@ -7600,14 +8258,28 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
         lower_data = pd.DataFrame(lower_data)
     else:
         lower_data = lower_data.copy()
+    if isinstance(up_mask, np.ndarray):
+        up_mask = pd.DataFrame(up_mask)
+    elif up_mask is not None:
+        up_mask = up_mask.copy()
+    if isinstance(lower_mask, np.ndarray):
+        lower_mask = pd.DataFrame(lower_mask)
+    elif lower_mask is not None:
+        lower_mask = lower_mask.copy()
 
     # 得到上下三角的mask
-    up_mask = np.triu(np.ones_like(up_data), k=0) != 0
-    lower_mask = np.tril(np.ones_like(lower_data), k=0) != 0
+    up_tri_mask = np.triu(np.ones_like(up_data), k=0) != 0
+    lower_tri_mask = np.tril(np.ones_like(lower_data), k=0) != 0
+
+    # 利用上下三角的mask分别处理up和lower的mask(防止出现大块的不在三角内的mask)
+    if up_use_mask:
+        up_mask = up_mask.where(up_tri_mask, False)
+    if lower_use_mask:
+        lower_mask = lower_mask.where(lower_tri_mask, False)
 
     # 得到mask后的数据(将不需要的部分设置为nan,这里是包含对角线的上半和下半部分,包含对角线可以让vmin和vmax正确计算)
-    up_data = up_data.where(up_mask, np.nan)
-    lower_data = lower_data.where(lower_mask, np.nan)
+    up_data = up_data.where(up_tri_mask, np.nan)
+    lower_data = lower_data.where(lower_tri_mask, np.nan)
 
     # 处理vmin和vmax
     if up_vmin is None:
@@ -7627,6 +8299,10 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
     elif lower_vmax < np.nanmax(lower_data.values):
         lower_cbar_kwargs['add_geq'] = True
 
+    # 得到norm
+    up_norm = get_norm(up_norm_mode, vmin=up_vmin, vmax=up_vmax, norm_kwargs=up_norm_kwargs)
+    lower_norm = get_norm(lower_norm_mode, vmin=lower_vmin, vmax=lower_vmax, norm_kwargs=lower_norm_kwargs)
+
     # 对于使用同一个cmap的情况,需要保证两个vmin和vmax一致
     if same_cmap:
         up_vmin = min(up_vmin, lower_vmin)
@@ -7635,10 +8311,17 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
         lower_vmax = up_vmax
         up_cmap = cmap
         lower_cmap = cmap
+        if up_norm_mode != lower_norm_mode or up_norm_kwargs != lower_norm_kwargs:
+            raise ValueError('当same_cmap为True时,up和lower的norm_mode和norm_kwargs必须一致')
+        up_norm = get_norm(up_norm_mode, vmin=up_vmin, vmax=up_vmax, norm_kwargs=up_norm_kwargs)
+        lower_norm = up_norm
         if up_vmin > np.nanmin(up_data.values) or lower_vmin > np.nanmin(lower_data.values):
             heatmap_kwargs['cbar_kwargs']['add_leq'] = True
         if up_vmax < np.nanmax(up_data.values) or lower_vmax < np.nanmax(lower_data.values):
             heatmap_kwargs['cbar_kwargs']['add_geq'] = True
+        if up_use_mask or lower_use_mask:
+            up_use_mask = True
+            lower_use_mask = True
 
     # 确保是方阵
     if up_data.shape[0] != up_data.shape[1]:
@@ -7647,14 +8330,14 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
         raise ValueError('lower_data必须是方阵')
 
     # 绘制上三角(mask掉下三角)
-    sns_heatmap(ax, up_data, cmap=up_cmap, vmin=up_vmin, vmax=up_vmax, cbar=False, **heatmap_kwargs)
+    sns_heatmap(ax, up_data, cmap=up_cmap, norm_mode=up_norm_mode, vmin=up_vmin, vmax=up_vmax, norm_kwargs=up_norm_kwargs, cbar=False, mask=up_mask, mask_color=up_mask_color, **heatmap_kwargs)
     # 绘制下三角(mask掉上三角)
-    sns_heatmap(ax, lower_data, cmap=up_cmap, vmin=up_vmin, vmax=up_vmax, cbar=False, **heatmap_kwargs)
+    sns_heatmap(ax, lower_data, cmap=up_cmap, norm_mode=lower_norm_mode, vmin=lower_vmin, vmax=lower_vmax, norm_kwargs=lower_norm_kwargs, cbar=False, mask=lower_mask, mask_color=lower_mask_color, **heatmap_kwargs)
     cbar_list = []
     if cbar:
         if same_cmap:
             # 使用same_cmap的情况,只需要绘制一次cbar
-            cbar_list.append(add_side_colorbar(ax, cmap=cmap, vmin=up_vmin, vmax=up_vmax, cbar_position=cbar_position, cbar_label=cbar_label, **heatmap_kwargs['cbar_kwargs']))
+            cbar_list.append(add_side_colorbar(ax, cmap=cmap, vmin=up_vmin, vmax=up_vmax, cbar_position=cbar_position, cbar_label=cbar_label, use_mask=up_use_mask, mask_color=up_mask_color, **heatmap_kwargs['cbar_kwargs']))
         else:
             side_ax = add_side_ax(ax, position=cbar_position['position'], relative_size=cbar_position['size'], pad=cbar_position['pad'])
             if cbar_position['position'] in ['top', 'bottom']:
@@ -7662,13 +8345,25 @@ def sns_triangle_heatmap(ax, up_data, lower_data, same_cmap=True, cmap=CMAP, up_
             elif cbar_position['position'] in ['left', 'right']:
                 orientation = 'vertical'
             up_ax, lower_ax = split_ax(side_ax, orientation=orientation, ratio=0.5, pad=two_cbar_pad)
-            cbar_list.append(add_colorbar(ax=up_ax, cmap=up_cmap, vmin=up_vmin, vmax=up_vmax, cbar_position=cbar_position, cbar_label=up_cbar_label, **up_cbar_kwargs))
-            cbar_list.append(add_colorbar(ax=lower_ax, cmap=lower_cmap, vmin=lower_vmin, vmax=lower_vmax, cbar_position=cbar_position, cbar_label=lower_cbar_label, **lower_cbar_kwargs))
+            cbar_list.append(add_colorbar(ax=up_ax, cmap=up_cmap, vmin=up_vmin, vmax=up_vmax, cbar_position=cbar_position, cbar_label=up_cbar_label, use_mask=up_use_mask, mask_color=up_mask_color, **up_cbar_kwargs))
+            cbar_list.append(add_colorbar(ax=lower_ax, cmap=lower_cmap, vmin=lower_vmin, vmax=lower_vmax, cbar_position=cbar_position, cbar_label=lower_cbar_label, use_mask=lower_use_mask, mask_color=lower_mask_color, **lower_cbar_kwargs))
 
     # 给对角线添加线并上色
     for i in range(up_data.shape[0]):
-        plt_polygon(ax, [(i, i), (i + 1, i), (i + 1, i + 1)], color=scale_cmap(up_cmap, vmin=up_vmin, vmax=up_vmax)(up_data.iloc[i, i]), adjust_lim=False)
-        plt_polygon(ax, [(i, i), (i, i + 1), (i + 1, i + 1)], color=scale_cmap(lower_cmap, vmin=lower_vmin, vmax=lower_vmax)(lower_data.iloc[i, i]), adjust_lim=False)
+        if up_mask is not None:
+            if up_mask.loc[i, i]:
+                plt_polygon(ax, [(i, i), (i + 1, i), (i + 1, i + 1)], color=up_mask_color, adjust_lim=False)
+            else:
+                plt_polygon(ax, [(i, i), (i + 1, i), (i + 1, i + 1)], color=up_cmap(up_norm(up_data.iloc[i, i])), adjust_lim=False)
+        else:
+            plt_polygon(ax, [(i, i), (i + 1, i), (i + 1, i + 1)], color=up_cmap(up_norm(up_data.iloc[i, i])), adjust_lim=False)
+        if lower_mask is not None:
+            if lower_mask.loc[i, i]:
+                plt_polygon(ax, [(i, i), (i, i + 1), (i + 1, i + 1)], color=lower_mask_color, adjust_lim=False)
+            else:
+                plt_polygon(ax, [(i, i), (i, i + 1), (i + 1, i + 1)], color=lower_cmap(lower_norm(lower_data.iloc[i, i])), adjust_lim=False)
+        else:
+            plt_polygon(ax, [(i, i), (i, i + 1), (i + 1, i + 1)], color=lower_cmap(lower_norm(lower_data.iloc[i, i])), adjust_lim=False)
     # 绘制分界线
     plt_line(ax, [0, up_data.shape[0]], [0, up_data.shape[0]], color=WHITE)
     return cbar_list
@@ -7814,7 +8509,7 @@ def add_linregress_text(ax, regress_dict, show_list=None, round_digit_list=None,
 # endregion
 
 
-# region 判断是否是xlabel, ylabel, title, ax的外框
+# region 通用函数(判断是否是xlabel, ylabel, title, ax的外框)
 @to_be_improved
 def is_xlabel(obj):
     '''
@@ -7884,7 +8579,7 @@ def is_ax_bounding_box(obj):
 # endregion
 
 
-# region zorder
+# region 通用函数(zorder)
 def set_zorder(obj, new_zorder):
     '''
     设置对象的zorder值。zorder值越高，对象就越靠近顶部。
@@ -7980,14 +8675,16 @@ def show_zorder(ax, include_axes=False, font_size=FONT_SIZE, color=RED, alpha=FA
 # endregion
 
 
-# region inch, width, height, figsize, axsize
+# region 通用函数(inch和point单位转换)
 def inch_to_point(inch):
     '''
     将plt中使用的inch单位转换为points单位
     '''
     return inch * 72
+# endregion
 
 
+# region 通用函数(ax_size)
 def get_ax_size(ax):
     '''
     获取给定轴的尺寸（以英寸为单位）。
@@ -8014,22 +8711,26 @@ def get_ax_size(ax):
 # endregion
 
 
-# region xy_lim spine tick axis aspect设置函数
-def share_ax(*axes, sharex=True, sharey=True):
+# region 通用函数(spine)
+def move_spine_to_origin(ax, axis='both', arrow=True):
     '''
-    通过在原先位置强行创建新的ax来共享轴。
+    将坐标轴移动到原点
+
+    参数:
+    ax: matplotlib.axes.Axes 对象
+    axis: str, 要移动的坐标轴, 可选 'x', 'y', 'both', 默认 'both'
+    arrow: bool, 是否在坐标轴末端添加箭头, 默认 True
     '''
-    print('to be teset')
-    fig = axes[0].get_figure()
-    new_axes = []
-    for i, ax in enumerate(axes):
-        pos = ax.get_position()
-        if i==0:
-            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height))
-        else:
-            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height, sharex=axes[0] if sharex else None, sharey=axes[0] if sharey else None))
-        ax.set_visible(False)
-    return new_axes
+    if axis == 'x' or axis == 'both':
+        ax.spines["bottom"].set_position(("data", 0))
+        if arrow:
+            ax.plot(1, 0, ">k", transform=ax.get_yaxis_transform(), clip_on=False)
+    if axis == 'y' or axis == 'both':
+        ax.spines["left"].set_position(("data", 0))
+        if arrow:
+            ax.plot(0, 1, "^k", transform=ax.get_xaxis_transform(), clip_on=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
 
 def rm_ax_spine(ax, spines_to_remove=None):
@@ -8042,24 +8743,214 @@ def rm_ax_spine(ax, spines_to_remove=None):
     '''
     if spines_to_remove is None:
         spines_to_remove = ['top', 'right', 'left', 'bottom']
+    if isinstance(spines_to_remove, str):
+        spines_to_remove = [spines_to_remove]
 
     for spine in spines_to_remove:
         ax.spines[spine].set_visible(False)
 
 
-def rm_ax_tick(ax, ticks_to_remove=None):
+def rm_cbar_spine(cbar):
+    '''
+    移除cbar的边框。(这里就不是通过spine的设置来移除了)
+
+    参数:
+    - cbar: matplotlib的Colorbar对象
+    '''
+    cbar.outline.set_visible(False)
+# endregion
+
+
+# region 通用函数(tick)
+def add_nested_tick(ax, axis, ticks, labels, location=0, length=TICK_MAJOR_SIZE*4, width=0):
+    """
+    在给定的轴上添加嵌套的刻度线和标签。为了美观起见, 使用了这个函数后再添加xlabel最好在sec上添加, 语法几乎等同于ax.set_xlabel等
+
+    参数:
+    ax (matplotlib.axes.Axes): 要添加嵌套刻度线的轴
+    axis (str): 要添加嵌套刻度线的轴,可以是'x'或'y'
+    ticks (list): 要添加的刻度线的位置
+    labels (list): 要添加的标签
+    location (float, optional): 次要刻度线的位置。默认为0
+    length (float, optional): 刻度线的长度。默认为 None。
+    """
+    if axis == 'x':
+        sec = ax.secondary_xaxis(location=location)
+        sec.set_xticks(ticks, labels)
+        sec.tick_params(axis='x', length=length, width=width)
+        sec.spines['bottom'].set_visible(False)
+    elif axis == 'y':
+        sec = ax.secondary_yaxis(location=location)
+        sec.set_yticks(ticks, labels)
+        sec.tick_params(axis='y', length=length, width=width)
+        sec.spines['left'].set_visible(False)
+    return sec
+
+
+def add_sep_tick(ax, axis, ticks, length=TICK_MAJOR_SIZE*4, width=TICK_MAJOR_WIDTH*2):
+    """
+    在给定的轴上添加tick作为某种分界线。为了美观起见, 使用了这个函数后再添加xlabel最好在sec上添加, 语法几乎等同于ax.set_xlabel等
+
+    参数:
+    ax (matplotlib.axes.Axes): 要添加嵌套刻度线的轴
+    axis (str): 要添加嵌套刻度线的轴,可以是'x'或'y'
+    ticks (list): 要添加的刻度线的位置
+    length (float, optional): 刻度线的长度。默认为 None。
+    width (float, optional): 刻度线的宽度。默认为LINE_WIDTH。
+    """
+    if axis == 'x':
+        sec = ax.secondary_xaxis(location=0)
+        sec.set_xticks(ticks, labels=[])
+        sec.tick_params('x', length=length, width=width)
+        sec.spines['bottom'].set_visible(False)
+    elif axis == 'y':
+        sec = ax.secondary_yaxis(location=0)
+        sec.set_yticks(ticks, labels=[])
+        sec.tick_params('y', length=length, width=width)
+        sec.spines['left'].set_visible(False)
+
+
+def rm_ax_tick(ax, axis=None):
     '''
     移除轴的刻度。
 
     参数:
     - ax: matplotlib的Axes对象
-    - ticks_to_remove: 要移除的刻度列表
-    '''
-    if ticks_to_remove is None or ticks_to_remove == 'both':
-        ticks_to_remove = ['x', 'y']
+    - axis: 要移除的轴
 
-    for tick in ticks_to_remove:
-        getattr(ax, f'set_{tick}ticks')([])
+    注意:
+    - ax.set_xticks([])和ax.set_yticks([])可以移除刻度, 但是这样会在sharex和sharey的情况下移除其他轴的刻度
+    '''
+    if axis is None or axis == 'both':
+        axis = ['x', 'y']
+
+    for tick in axis:
+        if tick == 'x':
+            ax.xaxis.set_tick_params(width=0)
+        elif tick == 'y':
+            ax.yaxis.set_tick_params(width=0)
+
+
+def rm_ax_ticklabel(ax, axis):
+    '''
+    移除轴的刻度。
+
+    参数:
+    - ax: matplotlib的Axes对象
+    - axis: 要移除的轴
+
+    注意:
+    - 此函数会对所有sharex和sharey的轴生效
+    '''
+    if axis is None or axis == 'both':
+        axis = ['x', 'y']
+
+    for tick in axis:
+        if tick == 'x':
+            ax.set_xticklabels([])
+        elif tick == 'y':
+            ax.set_yticklabels([])
+# endregion
+
+
+# region 通用函数(locator)
+
+# endregion
+
+
+# region 通用函数(axis)
+def broken_axis(ax1, ax2, orientation, link_kwargs=None):
+    '''
+    连接两个ax, 并绘制出中断的轴的效果, 可搭配split_ax使用, 注意设置好xlim和ylim等
+
+    参数:
+    ax1, ax2: 两个需要连接的ax(按照坐标,从小到大,纵向的时候底部的是ax1,顶部的是ax2,横向的时候左边的是ax1,右边的是ax2)
+    orientation: str, 连接的方向, 可选 'vertical', 'horizontal'
+    link_kwargs: dict, 连接线的参数
+    '''
+    # 更新连接线的参数
+    link_kwargs = update_dict(dict(marker=[(-1, -0.5), (1, 0.5)], markersize=MARKER_SIZE*2, linestyle="none", color='k', mec='k', mew=1, clip_on=False), link_kwargs)
+    
+    # 获取轴的位置信息
+    ax1_pos = ax1.get_position()
+    ax2_pos = ax2.get_position()
+    
+    # 根据方向进行处理
+    if orientation == 'vertical':
+        # 纵向连接
+        if ax1_pos.y0 > ax2_pos.y0:
+            raise ValueError('ax1应该在ax2的底部')
+        
+        # 隐藏上方轴的底部和下方轴的顶部
+        ax2.spines.bottom.set_visible(False)
+        ax1.spines.top.set_visible(False)
+        
+        # 将上方轴的x轴移到顶部，不显示刻度标签
+        ax2.xaxis.tick_top()
+        ax2.tick_params(labeltop=False)
+        
+        # 设置下方轴的刻度标签
+        ax1.xaxis.tick_bottom()
+        
+        # 在上下轴的边界处绘制连接线
+        ax2.plot([0, 1], [0, 0], transform=ax2.transAxes, **link_kwargs)
+        ax1.plot([0, 1], [1, 1], transform=ax1.transAxes, **link_kwargs)
+        
+    elif orientation == 'horizontal':
+        # 横向连接
+        if ax1_pos.x0 > ax2_pos.x0:
+            raise ValueError('ax1应该在ax2的左边')
+        
+        # 隐藏右侧轴的左边和左侧轴的右边
+        ax2.spines.left.set_visible(False)
+        ax1.spines.right.set_visible(False)
+        
+        # 将右侧轴的y轴移到右边，不显示刻度标签
+        ax2.yaxis.tick_right()
+        ax2.tick_params(labelright=False)
+        
+        # 设置左侧轴的刻度标签
+        ax1.yaxis.tick_left()
+        
+        # 在左右轴的边界处绘制连接线
+        ax2.plot([0, 0], [0, 1], transform=ax2.transAxes, **link_kwargs)
+        ax1.plot([1, 1], [0, 1], transform=ax1.transAxes, **link_kwargs)
+
+
+def share_axis(*axes, sharex=True, sharey=True):
+    '''
+    通过在原先位置强行创建新的ax来共享轴。
+    '''
+    fig = axes[0].get_figure()
+    new_axes = []
+    for i, ax in enumerate(axes):
+        pos = ax.get_position()
+        if i==0:
+            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height))
+        else:
+            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height, sharex=axes[0] if sharex else None, sharey=axes[0] if sharey else None))
+        ax.set_visible(False)
+    return new_axes
+
+
+def move_axis(ax, axis, position):
+    '''
+    将ax的某个轴移动到指定位置。
+    '''
+    if axis == 'y':
+        if position == 'right':
+            ax.yaxis.tick_right()
+            ax.yaxis.set_label_position('right')
+        elif position == 'left':
+            ax.yaxis.tick_left()
+            ax.yaxis.set_label_position('left')
+    elif axis == 'x':
+        if position == 'top':
+            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position('top')
+        elif position == 'bottom':
+            ax.xaxis.tick_bottom()
+            ax.xaxis.set_label_position('bottom')
 
 
 def rm_ax_axis(ax):
@@ -8116,7 +9007,32 @@ def set_ax_aspect_3d(ax, aspect=(1, 1, 1), adjustable='datalim', **kwargs):
 # endregion
 
 
-# region title, label, tick调整函数
+# region 通用函数(坐标轴刻度)
+def set_symlog_scale(ax, axis, linthresh, linscale=1, **kwargs):
+    '''
+    设置对数坐标轴的对称对数刻度。
+
+    参数:
+    - ax (matplotlib.axes.Axes): matplotlib的Axes对象
+    - axis (str): 要设置的坐标轴,可以是'x', 'y', 'z'
+    - linthresh (float): 线性区域的阈值(如果没有这个,在零处就有无穷个刻度,所以有设置的意义)
+    - linscale (float, optional): 线性区域的缩放因子(默认为1,意为线性区域从-linthresh到linthresh的视觉上等于对数区域的一格)
+    - **kwargs: 传递给set_xscale/set_yscale/set_zscale的其他参数
+    '''
+    if axis == 'x':
+        ax.set_xscale('symlog', linthresh=linthresh, linscale=linscale, **kwargs)
+    elif axis == 'y':
+        ax.set_yscale('symlog', linthresh=linthresh, linscale=linscale, **kwargs)
+    elif axis == 'z':
+        ax.set_zscale('symlog', linthresh=linthresh, linscale=linscale, **kwargs)
+
+
+def set_cbar_tick(cbar, norm_mode='linear', ticks=None):
+    pass
+# endregion
+
+
+# region 通用函数(title, label, tick调整, 对齐)
 def align_label(axs, axis, fig=None):
     '''
     将多个轴的标签对齐。
@@ -8152,26 +9068,6 @@ def align_label_manual(axs, axis, label_coord):
     elif axis == 'y':
         for ax in axs:
             ax.yaxis.set_label_coords(label_coord, 0.5)
-
-
-def move_axis(ax, axis, position):
-    '''
-    将ax的某个轴移动到指定位置。
-    '''
-    if axis == 'y':
-        if position == 'right':
-            ax.yaxis.tick_right()
-            ax.yaxis.set_label_position('right')
-        elif position == 'left':
-            ax.yaxis.tick_left()
-            ax.yaxis.set_label_position('left')
-    elif axis == 'x':
-        if position == 'top':
-            ax.xaxis.tick_top()
-            ax.xaxis.set_label_position('top')
-        elif position == 'bottom':
-            ax.xaxis.tick_bottom()
-            ax.xaxis.set_label_position('bottom')
 
 
 def get_label_obj(ax, axis):
@@ -8288,8 +9184,10 @@ def adjust_ax_tick(ax, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTAT
     # 旋转y轴刻度标签
     ax.set_yticks(ax.get_yticks())
     ax.set_yticklabels(ax.get_yticklabels(), rotation=ytick_rotation)
+# endregion
 
 
+# region 通用函数(一键调整ax)
 def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_size=None, ytick_size=None, ztick_size=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xsci=None, ysci=None, zsci=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, tight_layout=False):
     '''
     设置图表的轴、标题、范围和图例
@@ -8387,6 +9285,8 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 
     # 检查是否有图例标签
     handles, labels = ax.get_legend_handles_labels()
+    # 去掉重复
+    handles, labels = dict(zip(labels, handles)).values(), dict(zip(labels, handles)).keys()
     if labels:
         labels = [format_text(label, text_process) for label in labels]
         ax.legend(handles, labels, loc=legend_loc,
@@ -8400,7 +9300,7 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 # endregion
 
 
-# region 创建fig, ax函数
+# region 通用函数(创建fig, ax)
 def get_fig_ax(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, fig_width=None, fig_height=None, sharex=False, sharey=False, subplots_params=None, adjust_params=False, ax_box_params=None, margin=None):
     '''
     创建一个图形和轴对象，并根据提供的参数调整布局和轴的方框边缘。推荐的方式是设定ax_width和ax_height，而不是fig_width和fig_height。当设定ax_width和ax_height时，fig_width和fig_height会自动计算, 此时设定margin不会破坏ax框的比例
@@ -8462,7 +9362,7 @@ def get_fig_ax_3d(**kwargs):
 # endregion
 
 
-# region 保存图像函数
+# region 通用函数(保存图像)
 def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=True, **kwargs):
     '''
     保存图形到指定的文件格式(搭配concat_str使用,concat_str可以用于生成文件名)
@@ -8576,7 +9476,7 @@ def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 
 # endregion
 
 
-# region 图片格式转换函数
+# region 通用函数(图片格式转换)
 def convert_fig(input_file_path, output_format):
     input_format = input_file_path.split('.')[-1].lower()
     output_file_path = input_file_path[:-len(input_format)] + output_format
