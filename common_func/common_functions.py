@@ -1042,9 +1042,56 @@ class PrintLogger(Logger):
 
 
 # region 文件操作相关函数
+@message_decorator("it will print the common_functions.py, if you want to use it in another file, you can directly copy the code in the file")
+def current_file_py():
+    '''获取当前文件名'''
+    return os.path.basename(__file__)
+
+
+def caller_filename():
+    '''打印调用此函数的文件名'''
+    # 获取调用栈
+    stack = inspect.stack()
+    # 获取调用者的帧信息
+    caller_frame = stack[1]
+    # 获取调用者文件名
+    caller_filename = caller_frame.filename
+    # 打印文件名
+    return caller_filename
+
+
+def current_file_ipynb():
+    '''获取当前文件名'''
+    from IPython import get_ipython
+    ip = get_ipython()
+    path = None
+    if '__vsc_ipynb_file__' in ip.user_ns:
+        path = ip.user_ns['__vsc_ipynb_file__']
+    return path
+
+
+def current_file():
+    '''获取当前文件名'''
+    try:
+        return current_file_ipynb()
+    except:
+        # 获取调用栈
+        stack = inspect.stack()
+        # 获取调用者的帧信息
+        caller_frame = stack[1]
+        # 获取调用者文件名
+        caller_filename = caller_frame.filename
+        # 打印文件名
+        return caller_filename
+
+
 def current_dir():
     '''获取当前路径'''
     return os.getcwd()
+
+
+def get_parent_dir(basedir):
+    return Path(basedir).parent
 
 
 def get_script_name(extension=True):
@@ -1217,28 +1264,28 @@ def insert_dir(fn, insert_str):
         shutil.move(os.path.join(fn, file), os.path.join(fn, insert_str, file))
 
 
-def get_subdir(dir, full=True):
+def get_subdir(basedir, full=True):
     '''找到文件夹下的一级子文件夹,full为True则返回全路径,否则只返回文件夹名'''
     if full:
-        return [os.path.join(dir, d) for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
+        return [os.path.join(basedir, d) for d in os.listdir(basedir) if os.path.isdir(os.path.join(basedir, d))]
     else:
-        return [d for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
+        return [d for d in os.listdir(basedir) if os.path.isdir(os.path.join(basedir, d))]
 
 
-def get_common_subdir(dir, subdir_names=None):
+def get_common_subdir(basedir, subdir_names=None):
     '''
     生成子目录的路径列表。
 
     Args:
-        dir (str): 时间目录的路径。
+        basedir (str): 时间目录的路径。
         subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']。
 
     Returns:
         list: 子目录的完整路径列表。
     '''
     if subdir_names is None:
-        subdir_names = ['outcomes', 'models', 'figs', 'logs']
-    return [os.path.join(dir, subdir_name) for subdir_name in subdir_names]
+        subdir_names = ['outcomes', 'models', 'figs', 'logs', 'params']
+    return [os.path.join(basedir, subdir_name) for subdir_name in subdir_names]
 
 
 def find_fig(filename, order=None):
@@ -1258,6 +1305,29 @@ def find_fig(filename, order=None):
 
 
 # region 保存和加载相关函数
+def save_code_copy(destination_folder, code_name):
+    '''
+    将code保存为一个带时间戳的副本(code_name需要带后缀)
+    '''
+    # 确保目标文件夹存在
+    os.makedirs(destination_folder, exist_ok=True)
+
+    # 获取当前正在运行的code的路径
+    current_code_path = os.path.abspath(code_name)
+    
+    # 获取当前code的名称
+    current_code_name = os.path.basename(current_code_path)
+    
+    # 生成带时间戳的文件名
+    new_filename = f"{current_code_name.split('.')[0]}_{get_time()}.{current_code_name.split('.')[1]}"
+    
+    # 生成目标路径
+    destination_path = os.path.join(destination_folder, new_filename)
+    
+    # 复制文件
+    shutil.copy(current_code_path, destination_path)
+
+
 def save_dict(params, filename, format_list=None):
     '''保存字典到txt和pickle文件'''
     if format_list is None:
@@ -1273,9 +1343,16 @@ def save_dict(params, filename, format_list=None):
 
     # 保存到txt
     if 'txt' in format_list:
-        with open(filename+'.txt', 'w') as txt_file:
-            for key, value in params.items():
-                txt_file.write(f'{key}: {value}\n')
+        with open(filename + '.txt', 'w') as txt_file:
+            def write_dict(d, indent):
+                for key, value in d.items():
+                    if isinstance(value, dict):
+                        txt_file.write(' ' * indent + f'{key}:\n')
+                        write_dict(value, indent + 4)  # 增加缩进
+                    else:
+                        txt_file.write(' ' * indent + f'{key}: {value}\n')
+            indent = 0
+            write_dict(params, indent)
 
     # 保存到pickle
     if 'pkl' in format_list:
@@ -1895,12 +1972,46 @@ def format_filename(string, file_process=None):
         return string.replace(' ', file_process['replace_blank'])
 
 
-def concat_str(strs, sep='_', rm_double_sep=True):
-    '''连接字符串列表,并使用指定的分隔符连接'''
+def concat_str(strs, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True):
+    '''连接字符串列表,并使用指定的分隔符连接
+    
+    Parameters:
+    - strs: 要连接的字符串列表
+    - sep: 用作分隔符的字符串，默认为'_'
+    - rm_double_sep: 是否移除重复的分隔符，默认为True
+    - ignore_none: 是否忽略None值，默认为True
+    - ignore_empty: 是否忽略空字符串，默认为True
+    
+    Returns:
+    - 连接后的字符串
+    '''
+    # 如果 ignore_none 为 True，过滤掉 None 值
+    if ignore_none:
+        strs = [s for s in strs if s is not None]
+    
+    # 如果 ignore_empty 为 True，过滤掉空字符串
+    if ignore_empty:
+        strs = [s for s in strs if s != '']
+    
+    # 连接字符串
+    result = sep.join(strs)
+    
+    # 如果设置了 rm_double_sep 为 True，移除重复的分隔符
     if rm_double_sep:
-        return sep.join(strs).replace(sep*2, sep)
+        while sep*2 in result:
+            result = result.replace(sep*2, sep)
+    
+    return result
+
+
+def get_lim_str(lim):
+    '''
+    有时候画图需要按照xlim,ylim等作为文件名,这个函数可以将xlim,ylim等转化为字符串
+    '''
+    if lim is None:
+        return ''
     else:
-        return sep.join(strs)
+        return f'{lim[0]}_{lim[1]}'
 # endregion
 
 
@@ -1917,6 +2028,7 @@ def updata_dict_kwargs(dic, **kwargs):
     return dic
 
 
+@not_recommend
 def update_dict_by_name(dic, variable_names):
     '''根据变量名更新字典,不推荐'''
     for name in variable_names:
@@ -2077,6 +2189,8 @@ def list_shape(lst):
     '''
     if not isinstance(lst, list):
         return ()
+    if len(lst) == 0:
+        return (0,)
     return (len(lst),) + list_shape(lst[0])
 # endregion
 
@@ -2183,6 +2297,8 @@ def tuple_shape(tpl):
     '''
     if not isinstance(tpl, tuple):
         return ()
+    if len(tpl) == 0:
+        return (0,)
     return (len(tpl),) + tuple_shape(tpl[0])
 # endregion
 
@@ -2937,7 +3053,7 @@ def npnan_in_list(lst):
 # endregion
 
 
-# region 数据处理相关函数(缩放、标准化、裁剪、按比例分配、划分)
+# region 数据处理相关函数(缩放、标准化、裁剪、按比例分配、划分、分bin)
 def scale_range(min_val, max_val, prop):
     '''
     根据最小值和最大值计算扩展后的范围。
@@ -3476,6 +3592,204 @@ def get_bin_idx(data, bins, right=False, left_most=True, right_most=True):
             if data <= bins[0] or data >= bins[-1]:
                 return np.nan
     return idx
+
+
+def bin_timeseries(timeseries, bin_size, mode='mean'):
+    """
+    将时间序列转换为Bin后的时间序列，每个Bin包含固定数量的元素。
+    
+    参数:
+    timeseries (list or np.array): 时间序列数据
+    bin_size (int): 每个Bin包含的元素个数
+    mode (str): Bin后的时间序列的计算模式，可以是'mean'、'sum'。默认为'mean'。
+    
+    返回:
+    np.array: Bin后的时间序列，每个值为每个Bin的平均值
+
+    注意:
+    最后一点可能会被丢弃，以使时间序列的长度可以被bin_size整除。
+    """
+    # 确保timeseries是一个numpy数组
+    timeseries = np.array(timeseries)
+    
+    # 计算总的Bin数
+    num_bins = len(timeseries) // bin_size
+    
+    # 截取时间序列，使其长度可以被bin_size整除
+    trimmed_timeseries = timeseries[:num_bins * bin_size]
+    
+    # 将时间序列重塑为(num_bins, bin_size)的二维数组
+    reshaped_timeseries = trimmed_timeseries.reshape((num_bins, bin_size))
+    
+    # 计算每个Bin的值
+    if mode == 'mean':
+        binned_timeseries = np.mean(reshaped_timeseries, axis=1)
+    elif mode == 'sum':
+        binned_timeseries = np.sum(reshaped_timeseries, axis=1)
+    else:
+        raise ValueError("Invalid mode. Expected 'mean' or 'sum'.")
+    
+    return binned_timeseries
+
+
+def bin_multi_timeseries(multi_timeseries, bin_size, mode='mean'):
+    '''
+    multi_timeseries: (N, T)的二维数组，N为时间序列的数量，T为时间序列的长度
+    bin_size: 每个Bin的大小（时间步数）
+    mode: 'mean' 或 'sum'，表示对每个Bin计算均值或求和
+    '''
+    # 输入检查
+    if not isinstance(multi_timeseries, np.ndarray):
+        multi_timeseries = np.array(multi_timeseries)
+    
+    if multi_timeseries.ndim != 2:
+        raise ValueError("multi_timeseries should be a 2D array.")
+    
+    # 计算总的Bin数
+    num_bins = multi_timeseries.shape[1] // bin_size
+    
+    # 截取时间序列，使其长度可以被bin_size整除
+    trimmed_multi_timeseries = multi_timeseries[:, :num_bins * bin_size]
+    
+    # 将时间序列重塑为 (N, num_bins, bin_size)
+    reshaped_multi_timeseries = trimmed_multi_timeseries.reshape((multi_timeseries.shape[0], num_bins, bin_size))
+    
+    # 计算每个Bin的值
+    if mode == 'mean':
+        binned_timeseries = np.mean(reshaped_multi_timeseries, axis=2)
+    elif mode == 'sum':
+        binned_timeseries = np.sum(reshaped_multi_timeseries, axis=2)
+    else:
+        raise ValueError("Invalid mode. Expected 'mean' or 'sum'.")
+    
+    return binned_timeseries
+
+
+def convolve_timeseries(timeseries, kernel, mode='valid'):
+    """
+    对时间序列进行卷积操作，并返回结果。
+
+    参数:
+    timeseries (list or np.array): 时间序列数据
+    kernel (list or np.array): 用于卷积的核
+    mode (str): 卷积模式，可以是'full'、'valid'或'same'。默认为'full'。
+                - 'full': 返回完整的卷积结果。
+                - 'valid': 仅返回完全重叠部分的卷积结果。
+                - 'same': 返回与输入时间序列长度相同的卷积结果。
+
+    返回:
+    np.array: 卷积后的时间序列
+    """
+    # 确保timeseries和kernel是numpy数组
+    timeseries = np.array(timeseries)
+    kernel = np.array(kernel)
+
+    # 进行卷积操作
+    convolved_timeseries = scipy.signal.convolve(timeseries, kernel, mode=mode)
+
+    return convolved_timeseries
+
+
+def convolve_multi_timeseries(multi_timeseries, kernel, mode='valid'):
+    """
+    对多个时间序列进行卷积操作，并返回结果。
+
+    参数:
+    multi_timeseries (np.array): 一个形状为 (N, T) 的二维数组，N 为时间序列的数量，T 为时间序列的长度。
+    kernel (list or np.array): 用于卷积的核。
+    mode (str): 卷积模式，可以是 'full'、'valid' 或 'same'。默认为 'valid'。
+                - 'full': 返回完整的卷积结果。
+                - 'valid': 仅返回完全重叠部分的卷积结果。
+                - 'same': 返回与输入时间序列长度相同的卷积结果。
+
+    返回:
+    np.array: 卷积后的时间序列，形状为 (N, T')，其中 T' 取决于 mode 选项和 kernel 的长度。
+    """
+    # 确保 multi_timeseries 是一个 numpy 数组
+    multi_timeseries = np.array(multi_timeseries)
+    kernel = np.array(kernel)
+
+    # 获取时间序列的数量 N 和序列长度 T
+    N, T = multi_timeseries.shape
+
+    # 计算输出序列的长度
+    if mode == 'full':
+        output_length = T + len(kernel) - 1
+    elif mode == 'same':
+        output_length = T
+    elif mode == 'valid':
+        output_length = T - len(kernel) + 1
+    else:
+        raise ValueError("Invalid mode. Expected 'full', 'same', or 'valid'.")
+
+    # 初始化卷积结果数组
+    convolved_timeseries = np.zeros((N, output_length))
+
+    # 对每个时间序列进行卷积
+    for i in range(N):
+        convolved_timeseries[i] = scipy.signal.convolve(multi_timeseries[i], kernel, mode=mode)
+
+    return convolved_timeseries
+# endregion
+
+
+# region 数据降维相关函数
+def get_pca(data, n_components=2):
+    '''
+    执行主成分分析 (PCA) 并返回降维后的数据
+    自动处理NaN值,通过删除含有NaN的行
+
+    :param data: DataFrame或二维数组,原始数据
+    :param n_components: int, 保留的主成分数量
+    :return: PCA转换后的DataFrame
+    '''
+    data_clean = data.dropna()
+    pca = PCA(n_components=n_components)
+    principal_components = pca.fit_transform(data_clean)
+    principal_df = pd.DataFrame(data=principal_components,
+                                columns=[f'Principal Component {i+1}' for i in range(n_components)])
+    return principal_df
+
+
+def get_nmf(X, n_components, init='nndsvda', random_state=0, max_iter=200, normalize_components=True, **kwargs):
+    '''
+    Perform dimensionality reduction using NMF. (对行向量进行的)
+
+    Parameters:
+    X - array, the original data.
+    n_components - int, the number of components to keep.
+    init - {'random', 'nndsvd', 'nndsvda', 'nndsvdar', 'custom'}, default 'random'.
+    random_state - int, default 0.
+    max_iter - int, default 200.
+    normalize_components - bool, default True.
+
+    Returns:
+    W - array, the reduced dimensionality data.
+    H - array, the components.
+    '''
+    model = NMF(n_components=n_components, init=init,
+                random_state=random_state, max_iter=max_iter, **kwargs)
+    W = model.fit_transform(X)
+    H = model.components_
+
+    if normalize_components:
+        # Normalize each column in H to have unit L2 norm
+        norms = np.linalg.norm(H, axis=1)
+        H = H / norms[:, np.newaxis]
+
+    return W, H
+
+
+def get_tsne(data, n_components=2, perplexity=30, learning_rate=200, n_iter=1000, random_state=0):
+    '''
+    '''
+    pass
+
+
+def get_diffusion_map(data, n_components=2, n_neighbors=10, alpha=0.5, affinity='gaussian', random_state=0):
+    '''
+    '''
+    pass
 # endregion
 
 
@@ -3660,6 +3974,22 @@ def get_corr(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY, sync=
     return np.corrcoef(process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy), process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy))[0, 1]
 
 
+def get_CV(data, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
+    '''
+    计算数据的变异系数(Coefficient of Variation, CV)
+    '''
+    data = process_special_value(data, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    return np.std(data) / np.mean(data)
+
+
+def get_FF(data, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
+    '''
+    计算数据的Fano因子(Fano Factor, FF)
+    '''
+    data = process_special_value(data, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    return np.var(data) / np.mean(data)
+
+
 def get_linregress(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY, sync=True):
     '''
     对给定的数据进行线性回归拟合
@@ -3691,6 +4021,27 @@ def get_linregress(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY,
         (x * regress_dict['slope'] + regress_dict['intercept'])
 
     return regress_dict
+
+
+def get_curvefit(x, y, func, p0=None, bounds=(-np.inf, np.inf), maxfev=1000, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY, sync=True):
+    '''
+    对给定的数据进行曲线拟合
+
+    输出:
+    popt - 最优参数
+    pcov - 参数协方差
+    error - 残差平方和
+    '''
+    x, y = sync_special_value(x, y, inf_policy=inf_policy) if sync else (x, y)
+    x = np.array(process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy))
+    y = np.array(process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy))
+
+    popt, pcov = scipy.optimize.curve_fit(func, x, y, p0=p0, bounds=bounds, maxfev=maxfev)
+    error = []
+    for xi, yi in zip(x, y):
+        error.append((yi - func(xi, *popt))**2)
+    error = np.sum(error)
+    return popt, pcov, error
 
 
 def get_ks(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
@@ -3742,35 +4093,6 @@ def get_kl_divergence(p, q, base=None, **kwargs):
     return st.entropy(p, q, base=base, **kwargs)
 
 
-def get_nmf(X, n_components, init='nndsvda', random_state=0, max_iter=200, normalize_components=True, **kwargs):
-    '''
-    Perform dimensionality reduction using NMF. (对行向量进行的)
-
-    Parameters:
-    X - array, the original data.
-    n_components - int, the number of components to keep.
-    init - {'random', 'nndsvd', 'nndsvda', 'nndsvdar', 'custom'}, default 'random'.
-    random_state - int, default 0.
-    max_iter - int, default 200.
-    normalize_components - bool, default True.
-
-    Returns:
-    W - array, the reduced dimensionality data.
-    H - array, the components.
-    '''
-    model = NMF(n_components=n_components, init=init,
-                random_state=random_state, max_iter=max_iter, **kwargs)
-    W = model.fit_transform(X)
-    H = model.components_
-
-    if normalize_components:
-        # Normalize each column in H to have unit L2 norm
-        norms = np.linalg.norm(H, axis=1)
-        H = H / norms[:, np.newaxis]
-
-    return W, H
-
-
 def get_entropy(p, base=None, **kwargs):
     '''
     计算概率分布的熵
@@ -3816,27 +4138,12 @@ def get_jsd(p, q, base=None, **kwargs):
     return (get_kl_divergence(p, m, base=base, **kwargs) + get_kl_divergence(q, m, base=base, **kwargs)) / 2
 
 
-def get_pca(data, n_components=2):
-    '''
-    执行主成分分析 (PCA) 并返回降维后的数据
-    自动处理NaN值,通过删除含有NaN的行
-
-    :param data: DataFrame或二维数组,原始数据
-    :param n_components: int, 保留的主成分数量
-    :return: PCA转换后的DataFrame
-    '''
-    data_clean = data.dropna()
-    pca = PCA(n_components=n_components)
-    principal_components = pca.fit_transform(data_clean)
-    principal_df = pd.DataFrame(data=principal_components,
-                                columns=[f'Principal Component {i+1}' for i in range(n_components)])
-    return principal_df
-
-
 def get_fft(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
     '''
     执行快速傅里叶变换 (FFT) 并返回变换后的信号
     自动处理NaN值,通过线性插值填充NaN
+
+    注意: 这里的T需要以秒为单位，得到的结果才是以Hz为单位的
     '''
     if T is None and sample_rate is None:
         raise ValueError("Either T or sample_rate must be provided")
@@ -3863,6 +4170,8 @@ def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_poli
         raise ValueError("Either T or sample_rate must be provided")
     if T is None:
         T = 1 / sample_rate
+    if nlags > len(timeseries) - 1:
+        raise ValueError("nlags must be less than the length of the timeseries")
     clean_timeseries = process_special_value(
         timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
     return np.arange(nlags+1)*T, acf(clean_timeseries, nlags=nlags, fft=fft)
@@ -4015,6 +4324,33 @@ def get_midpoint(x):
     - midpoints: array, the midpoints of the input values.
     '''
     return (x[1:] + x[:-1]) / 2
+
+
+def get_mode_kde(data, bandwidth='scott', grid_size=1000):
+    """
+    使用核密度估计 (KDE) 找到数据的模态。
+
+    参数:
+    - data: 输入数据数组 (list, numpy array)
+    - bandwidth: KDE的带宽，可以是'scott', 'silverman'，或者一个浮点数
+    - grid_size: 用于计算密度的网格点数，默认是1000
+
+    返回:
+    - mode_estimate: 估计的模态值
+    """
+    # 创建核密度估计对象
+    kde = gaussian_kde(data, bw_method=bandwidth)
+
+    # 在数据范围内生成网格点
+    x = np.linspace(min(data), max(data), grid_size)
+    
+    # 计算每个点的密度值
+    kde_values = kde(x)
+    
+    # 找到密度值最高的点
+    mode_estimate = x[np.argmax(kde_values)]
+    
+    return mode_estimate
 
 
 def repeat_data(data, repeat_times):
@@ -5409,34 +5745,35 @@ def zoom_in_xrange(ax, zoom_in_ax, xmin, xmax, color=GREEN, alpha=FAINT_ALPHA, c
     alpha (float): 缩放框的透明度。默认为淡色。
     connection_mode (str): 连接线的方向。可以是 'up' 或 'down'。
     """
-    # 获取ax和zoom_in_ax的position
-    ax_pos = ax.get_position()
-    zoom_in_ax_pos = zoom_in_ax.get_position()
+    zoom_in_xrange_partial(ax, zoom_in_ax, xmin, xmax, xmin, xmax, color, alpha, connection_mode)
+    # # 获取ax和zoom_in_ax的position
+    # ax_pos = ax.get_position()
+    # zoom_in_ax_pos = zoom_in_ax.get_position()
     
-    # 判断缩放图的位置
-    if zoom_in_ax_pos.y0 > ax_pos.y0:
-        connection_mode = 'up'
-    elif zoom_in_ax_pos.y0 < ax_pos.y0:
-        connection_mode = 'down'
+    # # 判断缩放图的位置
+    # if zoom_in_ax_pos.y0 > ax_pos.y0:
+    #     connection_mode = 'up'
+    # elif zoom_in_ax_pos.y0 < ax_pos.y0:
+    #     connection_mode = 'down'
 
-    # 设置缩放图的 x 轴和 y 轴范围
-    zoom_in_ax.set_xlim(xmin, xmax)
-    ymin, ymax = ax.get_ylim()
-    zoom_in_ax.set_ylim(ymin, ymax)
+    # # 设置缩放图的 x 轴和 y 轴范围
+    # zoom_in_ax.set_xlim(xmin, xmax)
+    # ymin, ymax = ax.get_ylim()
+    # zoom_in_ax.set_ylim(ymin, ymax)
     
-    # 在主图和缩放图上添加缩放框
-    add_vspan(ax=ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
-    add_vspan(ax=zoom_in_ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    # # 在主图和缩放图上添加缩放框
+    # add_vspan(ax=ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
+    # add_vspan(ax=zoom_in_ax, xmin=xmin, xmax=xmax, color=color, alpha=alpha)
     
-    # 添加连接线
-    if connection_mode == 'up':
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymax, yB=ymin)
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymax, yB=ymin)
-    elif connection_mode == 'down':
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymin, yB=ymax)
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymin, yB=ymax)
-    else:
-        raise ValueError('connection_mode must be either "up" or "down"')
+    # # 添加连接线
+    # if connection_mode == 'up':
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymax, yB=ymin)
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymax, yB=ymin)
+    # elif connection_mode == 'down':
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmin, yA=ymin, yB=ymax)
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmax, yA=ymin, yB=ymax)
+    # else:
+    #     raise ValueError('connection_mode must be either "up" or "down"')
 
 
 def zoom_in_xrange_partial(ax, zoom_in_ax, xmin, xmax, zoom_xmin, zoom_xmax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
@@ -5497,34 +5834,35 @@ def zoom_in_yrange(ax, zoom_in_ax, ymin, ymax, color=GREEN, alpha=FAINT_ALPHA, c
     alpha (float): 缩放框的透明度。默认为淡色。
     connection_mode (str): 连接线的方向。可以是 'left' 或 'right'。
     """
-    # 获取ax和zoom_in_ax的position
-    ax_pos = ax.get_position()
-    zoom_in_ax_pos = zoom_in_ax.get_position()
+    zoom_in_yrange_partial(ax, zoom_in_ax, ymin, ymax, ymin, ymax, color, alpha, connection_mode)
+    # # 获取ax和zoom_in_ax的position
+    # ax_pos = ax.get_position()
+    # zoom_in_ax_pos = zoom_in_ax.get_position()
     
-    # 判断缩放图的位置
-    if zoom_in_ax_pos.x0 > ax_pos.x0:
-        connection_mode = 'right'
-    elif zoom_in_ax_pos.x0 < ax_pos.x0:
-        connection_mode = 'left'
+    # # 判断缩放图的位置
+    # if zoom_in_ax_pos.x0 > ax_pos.x0:
+    #     connection_mode = 'right'
+    # elif zoom_in_ax_pos.x0 < ax_pos.x0:
+    #     connection_mode = 'left'
 
-    # 设置缩放图的 x 轴和 y 轴范围
-    zoom_in_ax.set_ylim(ymin, ymax)
-    xmin, xmax = ax.get_xlim()
-    zoom_in_ax.set_xlim(xmin, xmax)
+    # # 设置缩放图的 x 轴和 y 轴范围
+    # zoom_in_ax.set_ylim(ymin, ymax)
+    # xmin, xmax = ax.get_xlim()
+    # zoom_in_ax.set_xlim(xmin, xmax)
     
-    # 在主图和缩放图上添加缩放框
-    add_hspan(ax=ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
-    add_hspan(ax=zoom_in_ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    # # 在主图和缩放图上添加缩放框
+    # add_hspan(ax=ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
+    # add_hspan(ax=zoom_in_ax, ymin=ymin, ymax=ymax, color=color, alpha=alpha)
     
-    # 添加连接线
-    if connection_mode == 'left':
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymin, yB=ymin)
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymax, yB=ymax)
-    elif connection_mode == 'right':
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymin, yB=ymin)
-        add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymax, yB=ymax)
-    else:
-        raise ValueError('connection_mode must be either "left" or "right"')
+    # # 添加连接线
+    # if connection_mode == 'left':
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymin, yB=ymin)
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmin, xB=xmax, yA=ymax, yB=ymax)
+    # elif connection_mode == 'right':
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymin, yB=ymin)
+    #     add_connection(axA=ax, axB=zoom_in_ax, xA=xmax, xB=xmin, yA=ymax, yB=ymax)
+    # else:
+    #     raise ValueError('connection_mode must be either "left" or "right"')
 
 
 def zoom_in_yrange_partial(ax, zoom_in_ax, ymin, ymax, zoom_ymin, zoom_ymax, color=GREEN, alpha=FAINT_ALPHA, connection_mode=None):
@@ -5602,7 +5940,7 @@ def add_connection(axA, axB, xA, yA, xB, yB, coordsA='data', coordsB='data', **k
     xA, yA (float): 起始点的 x, y 坐标
     xB, yB (float): 终止点的 x, y 坐标
     axA, axB (Axes): 起始点和终止点所在的子图
-    coordsA, coordsB (str): 坐标系,可以是'data', 'axes'或'figure'
+    coordsA, coordsB (str): 坐标系,可以是'data', 'axes fraction'等
     **kwargs: ConnectionPatch 的其他参数,如 arrowstyle, shrinkA, shrinkB 等
     """
     # 创建 ConnectionPatch 对象
@@ -6821,6 +7159,14 @@ def add_double_arrow(ax, x_start, y_start, x_end, y_end, xycoords='data', label=
     '''
     add_arrow(ax, x_start, y_start, x_end, y_end, xycoords=xycoords, label=label, fc=fc, ec=ec, linewidth=linewidth, arrow_sytle=arrow_sytle, head_width=head_width, head_length=head_length, alpha=alpha, **kwargs)
     add_arrow(ax, x_end, y_end, x_start, y_start, xycoords=xycoords, label=label, fc=fc, ec=ec, linewidth=linewidth, arrow_sytle=arrow_sytle, head_width=head_width, head_length=head_length, alpha=alpha, **kwargs)
+
+
+def add_quiver_3d(ax, x_start, y_start, z_start, x_end, y_end, z_end, label=None, color=RED, linewidth=LINE_WIDTH, arrow_length_ratio=0.3, alpha=1.0, **kwargs):
+    '''
+    在3D图中添加箭头。https://matplotlib.org/stable/api/_as_gen/mpl_toolkits.mplot3d.axes3d.Axes3D.quiver.html#mpl_toolkits.mplot3d.axes3d.Axes3D.quiver
+    注意: 如果设定length,这里的length会基于原先的箭头加倍得到长度,而不是直接设定长度。
+    '''
+    return ax.quiver(x_start, y_start, z_start, x_end-x_start, y_end-y_start, z_end-z_start, label=label, color=color, linewidth=linewidth, arrow_length_ratio=arrow_length_ratio, alpha=alpha, **kwargs)
 # endregion
 
 
@@ -7344,7 +7690,7 @@ def plt_group_box():
     pass
 
 
-def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True):
+def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, line_bound='ax', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True):
     '''
     使用线性回归结果绘制散点图和回归线,可以输入scatter的其他参数
 
@@ -7382,23 +7728,27 @@ def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, sho
     x = np.array(x)
     y = np.array(y)
 
-    # 计算线性回归
-    regress_dict = get_linregress(x, y, **regress_kwargs)
-
     # 绘制散点图
     if show_scatter:
         plt_scatter(ax, x, y, color=scatter_color,
                         label=label, **scatter_kwargs)
 
-    # 绘制回归线
-    add_sline(ax, regress_dict['slope'], regress_dict['intercept'], color=line_color, **line_kwargs)
+    if x.size > 1 and y.size > 1:
+        # 计算线性回归
+        regress_dict = get_linregress(x, y, **regress_kwargs)
 
-    add_linregress_text(ax, regress_dict, show_list=show_list,
-                        round_digit_list=round_digit_list, round_format_list=round_format_list, fontsize=text_size, **text_kwargs)
-    return regress_dict
+        # 绘制回归线
+        if line_bound == 'ax':
+            add_sline(ax, regress_dict['slope'], regress_dict['intercept'], color=line_color, **line_kwargs)
+        elif line_bound == 'data':
+            plt_line(ax, [np.nanmin(x), np.nanmax(x)], [np.nanmin(x) * regress_dict['slope'] + regress_dict['intercept'], np.nanmax(x) * regress_dict['slope'] + regress_dict['intercept']], color=line_color, **line_kwargs)
+
+        add_linregress_text(ax, regress_dict, show_list=show_list,
+                            round_digit_list=round_digit_list, round_format_list=round_format_list, fontsize=text_size, **text_kwargs)
+        return regress_dict
 
 
-def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
+def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, line_bound='ax', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
     '''
     绘制密度散点图。
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -7461,10 +7811,10 @@ def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_typ
         z = hist[ix, iy]
 
     if linregress:
-        # 这里设置show_scatter为False,因为前面已经画了散点这里只需要线性拟合的线
-        plt_linregress(ax, x_array, y_array, label=None, line_color=line_color, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs, show_scatter=False)
-
-    return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
+        # 这里设置show_scatter为False,因为只需要线性拟合的线,散点由plt_colorful_scatter绘制
+        return plt_linregress(ax, x_array, y_array, label=None, line_color=line_color, line_bound=line_bound, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs, show_scatter=False), plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
+    else:
+        return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
 
 
 def plt_marginal_density_scatter(ax, x, y, density_scatter_kwargs=None, marginal_kwargs=None):
@@ -7868,6 +8218,63 @@ def plt_advance_quiver(ax):
 
 
 # region 复杂作图函数(matplotlib系列,三维作图)
+def plt_colorful_scatter_3d(ax, x, y, z, c, cmap=CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, s=MARKER_SIZE**2, label=None, label_cmap_float=1.0, scatter_kwargs=None, cbar=True, cbar_postion=None, cbar_kwargs=None):
+    '''
+    绘制颜色关于c值变化的散点图。
+
+    参数:
+    - ax (matplotlib.axes.Axes): matplotlib的轴对象, 用于绘制图形。
+    - x (numpy.ndarray or list): x轴的数据。
+    - y (numpy.ndarray or list): y轴的数据。 
+    - z (numpy.ndarray or list): z轴的数据。
+    - c (numpy.ndarray or list): 颜色的数据。
+    - cmap (matplotlib.colors.Colormap, optional): 颜色映射, 默认为CMAP。
+    - norm_mode (str, optional): 颜色映射的规范化模式, 可选 'linear', 'log', 'symlog', 'two_slope'等, 默认为 'linear'
+    - vmin (float, optional): 颜色映射的最小值, 默认为None。
+    - vmax (float, optional): 颜色映射的最大值, 默认为None。
+    - norm_kwargs (dict or None, optional): 颜色映射规范化的其他参数
+    - s (float, optional): 散点的大小, 默认为MARKER_SIZE**2。
+    - label (str or None, optional): 散点的标签, 默认为None。
+    - label_cmap_float (float, optional): 代表性点的颜色映射模式, 默认为1.0。如果输入整数则会raise ValueError。
+    - scatter_kwargs (dict or None, optional): 传递给plt_scatter的其他参数。
+    - cbar (bool, optional): 是否添加颜色条,默认为True。
+    - cbar_postion (str or None, optional): 颜色条的位置,默认为None。
+    - cbar_kwargs (dict or None, optional): 传递给add_side_colorbar的其他参数。
+    '''
+    # 设置默认参数
+    if scatter_kwargs is None:
+        scatter_kwargs = {}
+    if cbar_kwargs is None:
+        cbar_kwargs = {}
+    if vmin is None:
+        vmin = np.nanmin(c)
+    if vmax is None:
+        vmax = np.nanmax(c)
+
+    # 获取颜色映射的规范化对象
+    norm = get_norm(norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+
+    # 绘制散点(暂时设置label为None)
+    local_scatter_kwargs = update_dict(scatter_kwargs, {'s': s})
+    sc = plt_scatter_3d(ax, x, y, z, color=None, c=c, cmap=cmap, label=None, norm=norm, **local_scatter_kwargs)
+
+    # 通过label_cmap_float来绘制代表性点并作出label
+    if isinstance(label_cmap_float, int):
+        print('warning: "label_cmap_float" is an integer, so it will be transformed to float')
+    ax.scatter([], [], [], color=cmap(float(label_cmap_float)), label=label, s=s)
+
+    # 添加颜色条
+    if cbar:
+        if vmin > np.nanmin(c):
+            cbar_kwargs['add_leq'] = True
+        if vmax < np.nanmax(c):
+            cbar_kwargs['add_geq'] = True
+        cbars = add_side_colorbar(ax, sc, vmin=vmin, vmax=vmax, norm_mode=norm_mode, norm_kwargs=norm_kwargs, cmap=cmap, cbar_position=cbar_postion, **cbar_kwargs)
+        return sc, cbars
+    else:
+        return sc
+
+
 def plt_voxel_heatmap(ax, data, cmap=CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, edgecolors=BLACK, cbar=True, cbar_position=None, cbar_label=None, mask=None, mask_color=MASK_COLOR, voxel_kwargs=None, cbar_kwargs=None):
     '''
     根据data中的值和指定的颜色映射绘制体素图。(data中的nan值将不会绘制,mask中的True值将会用mask_color绘制。)
@@ -8859,13 +9266,14 @@ def rm_ax_ticklabel(ax, axis):
 
 
 # region 通用函数(axis)
-def broken_axis(ax1, ax2, orientation, link_kwargs=None):
+def broken_axis(ax1, ax2, orientation, link_location='auto', link_kwargs=None):
     '''
     连接两个ax, 并绘制出中断的轴的效果, 可搭配split_ax使用, 注意设置好xlim和ylim等
 
     参数:
     ax1, ax2: 两个需要连接的ax(按照坐标,从小到大,纵向的时候底部的是ax1,顶部的是ax2,横向的时候左边的是ax1,右边的是ax2)
     orientation: str, 连接的方向, 可选 'vertical', 'horizontal'
+    link_location: str, 连接线的位置, 可选 'auto', 'top', 'bottom', 'left', 'right'
     link_kwargs: dict, 连接线的参数
     '''
     # 更新连接线的参数
@@ -8885,16 +9293,26 @@ def broken_axis(ax1, ax2, orientation, link_kwargs=None):
         ax2.spines.bottom.set_visible(False)
         ax1.spines.top.set_visible(False)
         
-        # 将上方轴的x轴移到顶部，不显示刻度标签
-        ax2.xaxis.tick_top()
-        ax2.tick_params(labeltop=False)
+        # # 将上方轴的x轴移到顶部，不显示刻度标签
+        # ax2.xaxis.tick_top()
+        # ax2.tick_params(labeltop=False)
         
-        # 设置下方轴的刻度标签
-        ax1.xaxis.tick_bottom()
+        # # 设置下方轴的刻度标签
+        # ax1.xaxis.tick_bottom()
+
+        # 将上方轴的x轴取消
+        ax2.xaxis.set_visible(False)
         
         # 在上下轴的边界处绘制连接线
-        ax2.plot([0, 1], [0, 0], transform=ax2.transAxes, **link_kwargs)
-        ax1.plot([0, 1], [1, 1], transform=ax1.transAxes, **link_kwargs)
+        if link_location == 'auto':
+            ax2.plot([0, 1], [0, 0], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([0, 1], [1, 1], transform=ax1.transAxes, **link_kwargs)
+        elif link_location == 'left':
+            ax2.plot([0], [0], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([0], [1], transform=ax1.transAxes, **link_kwargs)
+        elif link_location == 'right':
+            ax2.plot([1], [0], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([1], [1], transform=ax1.transAxes, **link_kwargs)
         
     elif orientation == 'horizontal':
         # 横向连接
@@ -8905,16 +9323,26 @@ def broken_axis(ax1, ax2, orientation, link_kwargs=None):
         ax2.spines.left.set_visible(False)
         ax1.spines.right.set_visible(False)
         
-        # 将右侧轴的y轴移到右边，不显示刻度标签
-        ax2.yaxis.tick_right()
-        ax2.tick_params(labelright=False)
+        # 将右侧轴的y轴取消
+        ax2.yaxis.set_visible(False)
+
+        # # 将右侧轴的y轴移到右边，不显示刻度标签
+        # ax2.yaxis.tick_right()
+        # ax2.tick_params(labelright=False)
         
-        # 设置左侧轴的刻度标签
-        ax1.yaxis.tick_left()
+        # # 设置左侧轴的刻度标签
+        # ax1.yaxis.tick_left()
         
         # 在左右轴的边界处绘制连接线
-        ax2.plot([0, 0], [0, 1], transform=ax2.transAxes, **link_kwargs)
-        ax1.plot([1, 1], [0, 1], transform=ax1.transAxes, **link_kwargs)
+        if link_location == 'auto':
+            ax2.plot([0, 0], [0, 1], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([1, 1], [0, 1], transform=ax1.transAxes, **link_kwargs)
+        elif link_location == 'top':
+            ax2.plot([0], [1], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([1], [1], transform=ax1.transAxes, **link_kwargs)
+        elif link_location == 'bottom':
+            ax2.plot([0], [0], transform=ax2.transAxes, **link_kwargs)
+            ax1.plot([1], [0], transform=ax1.transAxes, **link_kwargs)
 
 
 def share_axis(*axes, sharex=True, sharey=True):
@@ -9126,7 +9554,7 @@ def label_title_process(x_label, y_label, z_label, title, text_process=None):
     return format_text(x_label, text_process), format_text(y_label, text_process), format_text(z_label, text_process), format_text(title, text_process)
 
 
-def set_fig_title(fig, title, text_process=None, title_size=SUP_TITLE_SIZE):
+def set_fig_title(fig, title, text_process=None, title_size=SUP_TITLE_SIZE, **kwargs):
     '''
     设置图形的标题
 
@@ -9142,7 +9570,7 @@ def set_fig_title(fig, title, text_process=None, title_size=SUP_TITLE_SIZE):
     local_title = format_text(title, text_process)
 
     # 设置标题
-    fig.suptitle(local_title, fontsize=title_size)
+    fig.suptitle(local_title, fontsize=title_size, **kwargs)
 
 
 def get_tick_size(ax):
@@ -9188,7 +9616,7 @@ def adjust_ax_tick(ax, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTAT
 
 
 # region 通用函数(一键调整ax)
-def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_size=None, ytick_size=None, ztick_size=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xsci=None, ysci=None, zsci=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, tight_layout=False):
+def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_size=None, ytick_size=None, ztick_size=None, xtick_rotation=0, ytick_rotation=0, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xsci=None, ysci=None, zsci=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, tight_layout=False):
     '''
     设置图表的轴、标题、范围和图例
 
@@ -9250,8 +9678,10 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
         xtick_size = suitable_tick_size(len(ax.get_xticks()), width, tick_size, tick_proportion)
         ytick_size = suitable_tick_size(len(ax.get_yticks()), height, tick_size, tick_proportion)
 
-    ax.tick_params(axis='x', labelsize=xtick_size)
-    ax.tick_params(axis='y', labelsize=ytick_size)
+    ax.tick_params(axis='x', labelsize=xtick_size, rotation=xtick_rotation)
+    ax.tick_params(axis='x', which='minor', rotation=xtick_rotation)
+    ax.tick_params(axis='y', labelsize=ytick_size, rotation=ytick_rotation)
+    ax.tick_params(axis='y', which='minor', rotation=ytick_rotation)
 
     if is_3d:
         if ztick_size is None:
@@ -9278,9 +9708,11 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
         ax.set_zscale('log')
 
     # 设置坐标轴范围
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
-    if is_3d:
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    if is_3d and zlim is not None:
         ax.set_zlim(zlim)
 
     # 检查是否有图例标签
@@ -9297,6 +9729,45 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 
     if is_3d:
         set_ax_view_3d(ax, elev=elev, azim=azim)
+# endregion
+
+
+# region 通用函数(获取合适的margin)
+def get_margin(xlabel_space=False, ylabel_space=False, cbar_space=False):
+    '''
+    获取合适的margin
+
+    参数:
+    - xlabel_space: 是否加大留给x轴标签的间距
+    - ylabel_space: 是否加大留给y轴标签的间距
+    - cbar_space: 是否加大留给colorbar的间距
+    '''
+    margin = MARGIN.copy()
+    if xlabel_space:
+        margin['bottom'] += 0.05
+    if ylabel_space:
+        margin['left'] += 0.05
+    if cbar_space:
+        margin['right'] -= 0.05
+    return margin
+
+
+def get_margin_3d(bottom_space=False, left_space=False, cbar_space=False):
+    '''
+    获取合适的3D margin
+
+    参数:
+    - bottom_space: 是否加大留给底部的间距
+    - left_space: 是否加大留给侧边的间距
+    - cbar_space: 是否加大留给colorbar的间距
+    '''
+    margin = MARGIN_3D.copy()
+    if bottom_space:
+        margin['bottom'] += 0.05
+    if left_space:
+        margin['left'] += 0.05
+    if cbar_space:
+        margin['right'] -= 0.15
 # endregion
 
 
@@ -9402,9 +9873,10 @@ def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inch
         plt.close(fig)
 
 
-def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=False, **kwargs):
+def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pad_inches=PAD_INCHES, filename_process=None, pkl=False, **kwargs):
     '''
     轻量级的保存图形函数,只保存位图,降低dpi,不保存pkl
+    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
     '''
     formats = [SAVEFIG_RASTER_FORMAT]
     save_fig(fig, filename, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pad_inches=pad_inches, filename_process=filename_process, pkl=pkl, **kwargs)
@@ -9467,9 +9939,10 @@ def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), 
     return fig_paths_dict, fig_paths_list
 
 
-def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches=BBOX_INCHES, pkl=False, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
+def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pkl=False, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
     '''
     轻量级的保存3D图形的多个视角,只保存位图,降低dpi,不保存pkl,不生成视频,减少了azim_list的数量
+    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
     '''
     formats = [SAVEFIG_RASTER_FORMAT]
     save_fig_3d(fig, filename, elev_list=elev_list, azim_list=azim_list, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pkl=pkl, generate_video=generate_video, frame_rate=frame_rate, delete_figs=delete_figs, video_formats=video_formats, savefig_kwargs=savefig_kwargs)
