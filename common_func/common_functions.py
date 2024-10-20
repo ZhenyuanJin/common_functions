@@ -6,6 +6,7 @@ import re
 import sys
 import json
 import pickle
+import joblib
 import random
 import shutil
 import time
@@ -22,6 +23,8 @@ import importlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from io import StringIO
 import copy
+import hashlib
+import json
 
 
 # 数学和科学计算库
@@ -37,16 +40,20 @@ from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import pdist, squareform
 from sklearn.decomposition import PCA, NMF
 import statsmodels
-from statsmodels.tsa.stattools import acf
+from statsmodels.tsa.stattools import acf, acovf
 from statsmodels.distributions.empirical_distribution import ECDF
+from statsmodels.nonparametric.smoothers_lowess import lowess
 
 
 # 数据处理和可视化库
 import pandas as pd
 import seaborn as sns
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure, SubFigure
 from matplotlib.cm import ScalarMappable
 from matplotlib.ticker import FuncFormatter, ScalarFormatter, LogFormatter, LogFormatterExponent, LogFormatterMathtext, LogFormatterSciNotation, PercentFormatter
+import matplotlib.ticker as ticker
 from matplotlib.colors import BoundaryNorm, Normalize, ListedColormap, SymLogNorm, LogNorm, TwoSlopeNorm
 from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
@@ -66,13 +73,15 @@ import imageio
 BLUE = (0.01, 0.45, 0.70)
 RED = (1.00, 0.27, 0.01)
 GREEN = (0.01, 0.65, 0.50)
+YELLOW = (0.99, 0.70, 0.01)
 BLACK = (0.01, 0.01, 0.01)
 WHITE = (1.00, 1.00, 1.00)
 GRAY = (0.50, 0.50, 0.50)
 ORANGE = (1.00, 0.50, 0.01)
 PURPLE = (0.50, 0.01, 0.50)
 BROWN = (0.50, 0.16, 0.16)
-
+CRIMSON = (220 / 255, 20 / 255, 60 / 255)
+CYAN = (0.01, 0.75, 0.75)
 
 # mygo颜色
 RANA = (235 / 255, 235 / 255, 235 / 255)
@@ -137,7 +146,9 @@ MARGIN = {'left': 0.2, 'right': 0.85, 'bottom': 0.2, 'top': 0.85}     # 默认�
 SPACIOUS_MARGIN = {'left': 0.25, 'right': 0.8, 'bottom': 0.25, 'top': 0.8}     # 边框较宽的图形边距
 CBAR_MARGIN = {'left': 0.2, 'right': 0.8, 'bottom': 0.2, 'top': 0.85}     # 当右侧添加了colorbar时, 推荐的图形边距
 MARGIN_3D = {'left': 0.15, 'right': 0.85, 'bottom': 0.1, 'top': 0.85}     # 3d图形的默认边距
-CBAR_MARGIN_3D = {'left': 0.15, 'right': 0.7, 'bottom': 0.1, 'top': 0.85}     # 3d图形的默认边距
+CBAR_MARGIN_3D = {'left': 0.15, 'right': 0.7, 'bottom': 0.1, 'top': 0.85}     # 3d图形带有cbar的默认边距
+ADJUST_PARAMS_CUSTOM = {'left': 0.2, 'right': 0.85, 'bottom': 0.2, 'top': 0.85, 'wspace': 0.35, 'hspace': 0.35}     # 自定义的调整参数
+ADJUST_PARAMS_CUSTOM_3D = {'left': 0.15, 'right': 0.85, 'bottom': 0.1, 'top': 0.85, 'wspace': 0.3, 'hspace': 0.35}     # 默认的调整参数
 FONT_SIZE = 15     # 默认字体大小
 TITLE_SIZE = FONT_SIZE*2     # 默认标题字体大小
 SUP_TITLE_SIZE = FONT_SIZE*3     # 默认总标题字体大小
@@ -162,11 +173,14 @@ LEGEND_LOC = 'upper right'      # 图例位置
 PDF_FONTTYPE = 42     # 使pdf文件中的文字可编辑
 PAD_INCHES = 0.2     # 默认图形边距
 USE_MATHTEXT = True     # 使用数学文本
+USE_OFFSET = False     # 不使用偏移
 AXES_LINEWIDTH = LINE_WIDTH     # 设置坐标轴线宽
 TICK_MAJOR_WIDTH = 2    # x轴主刻度线的宽度
 TICK_MINOR_WIDTH = 1    # x轴次刻度线的宽度
 TICK_MAJOR_SIZE = 8     # x轴主刻度线的长度
 TICK_MINOR_SIZE = 4     # x轴次刻度线的长度
+TICK_DIRECTION = 'out'     # 刻度线的方向
+RM_REPEAT_TICK_LABEL_WHEN_SHARE = True     # 当共享坐标轴时,去除重复的刻度标签
 # endregion
 
 
@@ -191,6 +205,7 @@ plt.rcParams['legend.loc'] = LEGEND_LOC      # 图例位置
 plt.rcParams['pdf.fonttype'] = PDF_FONTTYPE     # 使pdf文件中的文字可编辑
 plt.rcParams['savefig.pad_inches'] = PAD_INCHES     # 图形边距
 plt.rcParams['axes.formatter.use_mathtext'] = USE_MATHTEXT     # 使用数学文本
+plt.rcParams['axes.formatter.useoffset'] = USE_OFFSET     # 使用偏移
 plt.rcParams['axes.linewidth'] = LINE_WIDTH     # 设置坐标轴线宽
 plt.rcParams['xtick.major.width'] = TICK_MAJOR_WIDTH   # x轴主刻度线的宽度
 plt.rcParams['xtick.minor.width'] = TICK_MINOR_WIDTH   # x轴次刻度线的宽度
@@ -200,6 +215,8 @@ plt.rcParams['xtick.major.size'] = TICK_MAJOR_SIZE  # x轴主刻度线的长度
 plt.rcParams['xtick.minor.size'] = TICK_MINOR_SIZE   # x轴次刻度线的长度
 plt.rcParams['ytick.major.size'] = TICK_MAJOR_SIZE  # y轴主刻度线的长度
 plt.rcParams['ytick.minor.size'] = TICK_MINOR_SIZE   # y轴次刻度线的长度
+plt.rcParams['xtick.direction'] = TICK_DIRECTION   # x轴刻度线的方向
+plt.rcParams['ytick.direction'] = TICK_DIRECTION   # y轴刻度线的方向
 #endregion
 
 
@@ -310,6 +327,7 @@ PROCESS_NUM = min(40, int(multiprocessing.cpu_count()/3))    # 默认multiproces
 def set_gpu(id):
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = id  # specify which GPU(s) to be used
+    print(f"Set to use GPU: {id}")
 
 
 def find_least_used_gpu():
@@ -347,6 +365,45 @@ def set_least_used_gpu():
 def get_core_num():
     # 返回CPU核心数量
     return multiprocessing.cpu_count()
+# endregion
+
+
+# region 获取内存大小
+def get_object_memory(obj, unit='gb'):
+    memory_size = sys.getsizeof(obj)
+    
+    if unit == 'bytes':
+        return memory_size
+    elif unit == 'kb':
+        return memory_size / 1024
+    elif unit == 'mb':
+        return memory_size / (1024 ** 2)
+    elif unit == 'gb':
+        return memory_size / (1024 ** 3)
+    else:
+        raise ValueError("Invalid unit. Please choose from 'bytes', 'kb', 'mb', or 'gb'.")
+
+
+def estimate_array_memory(shape, data_type='float64', unit='gb'):
+    '''
+        可以利用arr.dtype来获取数组的data type
+    '''
+    bytes_per_element = np.dtype(data_type).itemsize
+    total_elements = np.prod(shape)
+    total_bytes = total_elements * bytes_per_element
+
+    if unit == 'bytes':
+        memory_estimate = total_bytes
+    elif unit == 'kb':
+        memory_estimate = total_bytes / 1024
+    elif unit == 'mb':
+        memory_estimate = total_bytes / (1024 ** 2)
+    elif unit == 'gb':
+        memory_estimate = total_bytes / (1024 ** 3)
+    else:
+        raise ValueError("Invalid unit. Please choose from 'bytes', 'kb', 'mb', or 'gb'.")
+
+    return memory_estimate
 # endregion
 
 
@@ -413,11 +470,12 @@ def get_end_time():
     return time.perf_counter()
 
 
-def get_interval_time(start, print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+def get_interval_time(start, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
     '''获取时间间隔'''
     interval = time.perf_counter() - start
     if print_info:
-        print_title(f'Interval time: {round_float(interval, digits, format_type)} s')
+        # print_title(f'Interval time: {round_float(interval, digits, format_type)} s')
+        print_title(f'{title} takes {round_float(interval, digits, format_type)} s')
     return interval
 
 
@@ -661,8 +719,16 @@ def func_tester(func, lite=True, multi_result=False):
     return flex_func_tester(func, print, lite, multi_result)
 
 
-def break_point():
-    assert False, 'Break Point'
+def break_point(message='Break Point'):
+    '''
+    停止运行，打印消息
+    '''
+    assert False, message
+
+
+def print_current_line():
+    frame = inspect.currentframe()
+    print(f"Current line number: {frame.f_lineno}")
 # endregion
 
 
@@ -894,6 +960,10 @@ class Capturing(list):
 
 
 class Logger:
+    '''
+        需要利用logger.prt等来同时打印和记录log
+        add方法只记录log不打印
+    '''
     def __init__(self, n=PRINT_WIDTH, char=PRINT_CHAR, prt_mode=True, lite=True, print_title=True):
         self.log = []
         self.n = n
@@ -1001,15 +1071,12 @@ class Logger:
             return result
         return wrapper
 
-    def save(self, basedir=None, filename=None, mode='w'):
-        if basedir is None:
-            script_name = get_script_name(extension=False)
-            if script_name is None:
-                script_name = 'jupyter'
-            basedir = os.path.join(current_dir(), script_name, get_time(char='_'))
+    def save(self, basedir='./', filename=None, mode='w'):
         mkdir(basedir)
         if filename is None:
             filename = 'log.log'
+        elif not filename.endswith('.log'):
+            filename += '.log'
         with open(os.path.join(basedir, filename), mode=mode) as f:
             for line in self.log:
                 if line.endswith('\n'):
@@ -1019,6 +1086,9 @@ class Logger:
 
 
 class PrintLogger(Logger):
+    '''
+        重定向print到log中
+    '''
     def __init__(self, n=PRINT_WIDTH, char=PRINT_CHAR, lite=True, print_title=True):
         super().__init__(n=n, char=char, prt_mode=True, lite=lite, print_title=print_title)
         self.terminal = sys.stdout
@@ -1174,6 +1244,21 @@ def cpdir(src, dst, dirs_exist_ok=True, overwrite=False):
             shutil.copy2(src_file_path, dst_file_path)
 
 
+def cp_file(src, dest):
+    """
+    复制文件从 src 到 dest。
+
+    :param src: 源文件路径
+    :param dest: 目标文件路径或目标文件夹路径
+    """
+    try:
+        mkdir(dest)
+        shutil.copy(src, dest)
+        # print(f"文件已成功复制到 {dest}")
+    except Exception as e:
+        print(f"复制文件时出错: {e}")
+
+
 def mvdir(src, dst, overwrite=False):
     '''
     移动一个目录的最后一个层级到另一个目录里
@@ -1208,6 +1293,47 @@ def mvdir(src, dst, overwrite=False):
         else:
             # 如果目标路径不存在,执行移动操作
             shutil.move(local_src, final_dst)
+
+
+# def mv_file(source_file_path, destination_folder_path):
+#     """
+#     Moves a file from the source path to the destination folder.
+
+#     :param source_file_path: The full path of the file to be moved.
+#     :param destination_folder_path: The folder where the file should be moved.
+#     :return: The new path of the moved file.
+#     """
+#     try:
+#         # Ensure the destination folder exists
+#         os.makedirs(destination_folder_path, exist_ok=True)
+
+#         # Get the base name of the file
+#         file_name = os.path.basename(source_file_path)
+
+#         # Construct the full destination file path
+#         destination_file_path = os.path.join(destination_folder_path, file_name)
+
+#         # Move the file
+#         shutil.move(source_file_path, destination_file_path)
+
+#         # print(f"File moved to: {destination_file_path}")
+#         return destination_file_path
+#     except Exception as e:
+#         print(f"An error occurred while moving the file: {e}")
+#         return None
+
+
+def delete_file(file_path):
+    try:
+        # 尝试删除文件
+        os.remove(file_path)
+        print(f"文件 '{file_path}' 已成功删除。")
+    except FileNotFoundError:
+        print(f"错误: 文件 '{file_path}' 不存在。")
+    except PermissionError:
+        print(f"错误: 无权限删除文件 '{file_path}'。")
+    except Exception as e:
+        print(f"删除文件时发生意外错误: {e}")
 
 
 def mvdir_cp_like(src, dst, dirs_exist_ok=True, overwrite=False, rm_src=True):
@@ -1359,6 +1485,121 @@ def save_dict(params, filename, format_list=None):
         save_pkl(params, filename+'.pkl')
 
 
+def hash_or_str(key):
+    """将键转换为字符串，如果复杂则生成哈希值。"""
+    if isinstance(key, (str, int, float, bool)):
+        return str(key)
+    if isinstance(key, tuple):
+        if len(key) < 10:
+            return '_'.join(map(str, key))
+    return hashlib.md5(str(key).encode()).hexdigest()
+
+
+def get_load_function(format):
+    '''
+    根据格式获取合适的读取函数
+    '''
+    d = {'npy': load_array, 'npz': load_sps_array, 'pkl': load_pkl}
+    return d[format]
+
+
+def get_save_function(format):
+    '''
+    根据格式获取合适的保存函数
+    '''
+    d = {'npy': save_array, 'npz': save_sps_array, 'pkl': save_pkl}
+    return d[format]
+
+
+def get_format_for_object(obj):
+    '''
+    根据数据类型获取合适的保存格式
+    '''
+    if isinstance(obj, np.ndarray):
+        return 'npy'
+    elif isinstance(obj, sps.spmatrix):
+        return 'npz'
+    else:
+        return 'pkl'
+
+
+def save_key_value_pair(key, value, format_dict, save_dir):
+    '''
+    用于save_dict_separate函数,保存键值对到文件
+    '''
+    format_type = format_dict[key]  # 获取保存格式
+    str_key = hash_or_str(key)  # 将键转换为字符串或哈希值
+    save_func = get_save_function(format_type)  # 获取保存函数
+    save_func(value, os.path.join(save_dir, f'{str_key}.{format_type}'))  # 保存值到文件
+    return str_key, key
+
+
+def save_dict_separate(dict_data, save_dir, format_dict=None, overwrite=False, save_txt=True, process_num=1):
+    """
+    保存包含非字符串键的字典，将每个值保存为单独的文件，并保存键的映射关系。
+
+    参数：
+    dict_data (dict): 要保存的字典，字典的键可以是任何可哈希的类型。
+    save_dir (str): 保存文件的目标目录。
+    format_dict (dict): 指定每个键的保存格式(目前只支持.npy,.npz,.pkl),None则自动选择
+    overwrite (bool): 是否覆盖已存在的目标目录，默认为 False。
+    save_txt (bool): 是否保存为txt文件，默认为 True。(txt保存的是整个字典,方便预览)
+    """
+    if format_dict is None:
+        format_dict = create_dict(dict_data.keys(), None)
+
+    for k, v in format_dict.items():
+        if v is None:
+            format_dict[k] = get_format_for_object(dict_data[k])
+    
+    if overwrite:
+        shutil.rmtree(save_dir)
+
+    metadata = {}
+
+    results = multi_process_items_for(process_num=process_num, func=save_key_value_pair, for_dict=dict_data, kwargs={'format_dict': format_dict, 'save_dir': save_dir}, func_name=f'save dict to {save_dir}')
+    for r in results:
+        metadata[r[0]] = r[1]
+
+    # 保存键映射
+    save_dict(metadata, os.path.join(save_dir, 'metadata.pkl'))
+
+    # 保存原始字典
+    if save_txt:
+        save_dict(dict_data, os.path.join(save_dir, 'preview.txt'), format_list=['txt'])
+
+
+def load_dict_separate(load_dir):
+    """
+    从指定目录中加载字典，并还原原始的键和值类型。
+
+    参数：
+    load_dir (str): 包含 .npy 和 .pkl 文件及键映射的目录。
+
+    返回：
+    dict: 恢复的原始字典
+    """
+    # 加载键的映射关系
+    metadata = load_pkl(os.path.join(load_dir, 'metadata.pkl'))
+
+    loaded_data = {}
+
+    for subfile in os.listdir(load_dir):
+        # 获取文件名和后缀
+        filename, ext = os.path.splitext(subfile)
+        # 跳过键映射文件
+        if filename == 'metadata':
+            continue
+        if filename == 'preview':
+            continue
+        if filename in metadata.keys():
+            # 加载文件
+            load_func = get_load_function(ext[1:])
+            loaded_data[metadata[filename]] = load_func(os.path.join(load_dir, subfile))
+
+    return loaded_data
+
+
 def pop_dict_get_dir(params, value_dir_key, both_dir_key, basedir):
     '''
     弹出一部分参数,并且返回路径名
@@ -1413,6 +1654,122 @@ def load_pkl(filename):
         filename += '.pkl'
     with open(filename, 'rb') as f:
         return pickle.load(f)
+
+
+def save_joblib(obj, filename, compress=0, protocol=None):
+    """
+    使用 joblib 保存对象，确保文件后缀名为 .joblib
+
+    参数:
+    - obj: 需要保存的对象
+    - filename: 保存的文件名（如果没有以 .joblib 结尾，会自动添加）
+    - compress: 压缩级别，默认为 0（范围为 0 到 9），0 表示不压缩，9 表示最大压缩
+    - protocol: 序列化协议版本（默认使用 joblib 的默认协议）。可以传递一个整数（如 3、4 或 5），
+      表示 Python 的 Pickle 序列化协议版本。
+    """
+    # 创建文件夹
+    mkdir(os.path.dirname(filename))
+
+    # 如果文件名没有以 .joblib 结尾，自动添加后缀
+    if not filename.endswith('.joblib'):
+        filename += '.joblib'
+    
+    # 保存对象
+    joblib.dump(obj, filename, compress=compress, protocol=protocol)
+
+
+def load_joblib(filename):
+    """
+    使用 joblib 加载对象，文件后缀必须为 .joblib
+    """
+    # 检查文件是否以 .joblib 结尾
+    if not filename.endswith('.joblib'):
+        filename += '.joblib'
+
+    # 检查文件是否存在
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"File {filename} not found")
+    
+    # 加载对象
+    obj = joblib.load(filename)
+    return obj
+
+
+def save_pkl_better(obj, filename, mem_threshold=100, unit='mb'):
+    '''
+    根据内存大小自动选择保存方式
+    大于mem_threshold则使用joblib,否则使用pickle
+    '''
+    obj_mem = get_object_memory(obj, unit)
+    if obj_mem > mem_threshold:
+        save_joblib(obj, filename)
+    else:
+        save_pkl(obj, filename)
+
+
+def load_pkl_better(filename):
+    '''
+    自动寻找pkl或者joblib文件(要求filename不带后缀)
+    '''
+    if os.path.exists(filename + '.pkl'):
+        return load_pkl(filename)
+    elif os.path.exists(filename + '.joblib'):
+        return load_joblib(filename)
+
+
+def load_multi_pkl(basedir, params_name_list, pkl_name, sep='_'):
+    """
+    在basedir下寻找pkl文件，文件路径结构如下：
+    {basedir}/{params_name[0]}{sep}{params_name[0]_value}/{params_name[1]}{sep}{params_name[1]_value}/.../{after_subdir}/{pkl_name}.pkl
+
+    例如：
+    basedir = "/path/to/data"
+    params_name = ["model", "lr"]
+    pkl_name = "result"
+    after_subdir = "metrics"
+
+    则函数会在以下路径寻找pkl文件：
+    /path/to/data/model_{model_value}/lr_{lr_value}/metrics/result.pkl
+
+    Args:
+        basedir (str): 根目录
+        params_name_list (list): 参数名列表
+        pkl_name (str): pkl文件名（不含扩展名）
+        sep (str, optional): 参数名和参数值之间的分隔符. Defaults to '_'.
+
+    Returns:
+        dict: key为参数组合的元组表示（包含param名和value），value为对应的pkl文件内容
+    """
+    all_pkl = {}
+
+    for root, dirs, files in os.walk(basedir):
+        # 查找是否有符合条件的pkl文件
+        if pkl_name + '.pkl' in files:
+            # 获取当前路径中的各级参数值
+            relative_path = os.path.relpath(root, basedir)
+            subdir_parts = relative_path.split(os.sep)
+
+            param_items = []
+            valid = True
+            for i, param in enumerate(params_name_list):
+                expected_prefix = param + sep
+                if subdir_parts[i].startswith(expected_prefix):
+                    param_value = subdir_parts[i][len(expected_prefix):]
+                    param_items.append((param, param_value))  # 将param和其值作为元组存储
+                else:
+                    valid = False
+                    break
+            
+            # 如果目录结构有效，加载对应的pkl文件
+            if valid:
+                param_tuple = tuple(f"{param}{sep}{value}" for param, value in param_items)  # 生成包含param和value的元组
+                pkl_path = os.path.join(root, pkl_name + '.pkl')
+                try:
+                    all_pkl[param_tuple] = load_pkl(pkl_path)
+                except Exception as e:
+                    print(f"Error loading {pkl_path}: {e}")
+
+    return all_pkl
 
 
 def dict_exist(params, basedir, pkl_name, value_dir_key=None, both_dir_key=None, ignore_key=None):
@@ -1547,7 +1904,6 @@ def save_array(arr, filename):
     返回:
     无返回值。
     '''
-
     # 创建文件夹
     mkdir(os.path.dirname(filename))
 
@@ -1572,7 +1928,6 @@ def save_sps_array(arr, filename):
     返回:
     无返回值。
     '''
-
     # 创建文件夹
     mkdir(os.path.dirname(filename))
 
@@ -1617,7 +1972,6 @@ def load_sps_array(filename):
     arr: sps.spmatrix
         加载的稀疏矩阵对象。
     '''
-
     # 添加后缀
     if not filename.endswith('.npz'):
         filename += '.npz'
@@ -1642,6 +1996,14 @@ def load_txt(filename):
 
 
 # region 并行处理相关函数
+def check_if_multiprocessing():
+    current_process = multiprocessing.current_process()
+    if current_process.name == 'MainProcess':
+        return False
+    else:
+        return True
+
+
 def split_list(lst, n):
     '''
     将列表尽量均等地分割为n个子列表。
@@ -1673,7 +2035,7 @@ def split_list(lst, n):
     return divided_list
 
 
-def multi_process(process_num, func, args_list=None, kwargs_list=None):
+def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name=''):
     '''
     多进程并行处理函数
 
@@ -1682,11 +2044,16 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None):
     - func: function, 要并行处理的函数
     - args_list: list, 函数的位置参数列表
     - kwargs_list: list, 函数的关键字参数列表
+    - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
     假如args_list和kwargs_list的长度等于1,则会将其扩展到process_num
     假如args_list = [(1), (2)]这样的写法是不对的,至少要让里面成为元组,即args_list = [(1,), (2,)]
+    假如已经在multi_process中,继续使用multi_process会自动转为单进程运行(此时args_list和kwargs_list会被flatten)
     '''
+    if process_num > 1 and check_if_multiprocessing():
+        print_title('unable to use multiprocessing inside a multiprocessing process, use single process instead')
+        process_num = 1
     if args_list is None:
         args_list = [()]
     if kwargs_list is None:
@@ -1700,30 +2067,25 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None):
     if len(args_list) != process_num:
         if len(args_list) == 1:
             args_list = args_list * process_num
+        elif process_num == 1:
+            args_list = flatten_list(args_list, level=1)
         else:
             raise ValueError("The length of args_list must be equal to process_num or 1.")
     if len(kwargs_list) != process_num:
         if len(kwargs_list) == 1:
             kwargs_list = kwargs_list * process_num
+        elif process_num == 1:
+            kwargs_list = flatten_list(kwargs_list, level=1)
         else:
             raise ValueError("The length of kwargs_list must be equal to process_num or 1.")
 
     if process_num != 1:
-        print_title(f"Start processing with {process_num} processes")
+        print_title(f"Start {func_name} with {process_num} processes")
         results = []
         # 使用 ProcessPoolExecutor 进行多进程处理
         with ProcessPoolExecutor(max_workers=process_num) as executor:
             # 提交任务
             futures = [executor.submit(func, *args, **kwargs) for args, kwargs in zip(args_list, kwargs_list)]
-            
-            # 下面这段代码无法保证结果的顺序与提交的顺序相同,所以注释掉
-            # # 收集结果
-            # for future in as_completed(futures):
-            #     try:
-            #         results.append(future.result())
-            #     except Exception as e:
-            #         results.append(None)  # 或者处理异常
-            #         print(f"An error occurred: {e}")
             
             # 等待所有future对象按照提交的顺序完成，并收集结果
             for future in futures:
@@ -1745,24 +2107,30 @@ def part_list_for(func, for_list, for_idx_name, *args, **kwargs):
     return results
 
 
-def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i'):
+def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', func_name=''):
     '''
     多进程并行处理for循环,for循环形式为for i in for_list
 
     参数:
     - process_num: int, 并行处理的进程数
     - func: function, 要并行处理的函数
-    - args_list: list, 函数的位置参数列表
-    - kwargs_list: list, 函数的关键字参数列表
+    - args: 函数的位置参数(不推荐,因为idx在func中的位置不确定)
+    - kwargs: 函数的关键字参数
+    - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
     只有当for循环每个之间独立时才能使用这个函数
+    如果需要使用items()方法,请使用multi_process_items_for;如果需要使用enumerate()方法,请使用multi_process_enumerate_for;此处尚未支持zip()方法,但是zip也可以通过普通for循环实现
     '''
+    if args is None:
+        args = ()
+    if kwargs is None:
+        kwargs = {}
     for_list = list(for_list)   # 防止for_list是生成器,比如range(10)
     divided_list = split_list(for_list, process_num)
     args_list = [(func, divided, for_idx_name)+args for divided in divided_list]
     kwargs_list = [kwargs] * process_num
-    return flatten_list(multi_process(process_num, part_list_for, args_list, kwargs_list), level=1)
+    return flatten_list(multi_process(process_num, part_list_for, args_list, kwargs_list, func_name), level=1)
 
 
 def part_enumerate_for(func, idx_list, for_list, for_idx_name, for_item_name, *args, **kwargs):
@@ -1772,24 +2140,29 @@ def part_enumerate_for(func, idx_list, for_list, for_idx_name, for_item_name, *a
     return results
 
 
-def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', for_item_name='item'):
+def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', for_item_name='item', func_name=''):
     '''
     多进程并行处理for循环,for循环形式为for i, item in enumerate(for_list)
 
     参数:
     - process_num: int, 并行处理的进程数
     - func: function, 要并行处理的函数(必须把for_idx_name和for_item_name作为关键字参数传入(推荐)或者放在最后的位置参数(不推荐))
-    - args_list: list, 函数的位置参数列表
-    - kwargs_list: list, 函数的关键字参数列表
+    - args: 函数的位置参数(不推荐,因为idx和item在func中的位置不确定)
+    - kwargs: 函数的关键字参数
+    - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
     只有当for循环每个之间独立时才能使用这个函数
     '''
+    if args is None:
+        args = ()
+    if kwargs is None:
+        kwargs = {}
     divided_idx_list = split_list(range(len(for_list)), process_num)
     divided_list = split_list(for_list, process_num)
     args_list = [(func, divided_idx, divided, for_idx_name, for_item_name)+args for divided_idx, divided in zip(divided_idx_list, divided_list)]
     kwargs_list = [kwargs] * process_num
-    return flatten_list(multi_process(process_num, part_enumerate_for, args_list, kwargs_list), level=1)
+    return flatten_list(multi_process(process_num, part_enumerate_for, args_list, kwargs_list, func_name), level=1)
 
 
 def part_items_for(func, key_list, value_list, for_key_name, for_value_name, *args, **kwargs):
@@ -1799,25 +2172,36 @@ def part_items_for(func, key_list, value_list, for_key_name, for_value_name, *ar
     return results
 
 
-def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=None, for_key_name='key', for_value_name='value'):
+def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=None, for_key_name='key', for_value_name='value', func_name=''):
     '''
     多进程并行处理for循环,for循环形式为for key, value in for_dict.items()
 
     参数:
     - process_num: int, 并行处理的进程数
-    - func: function, 要并行处理的函数
-    - args_list: list, 函数的位置参数列表
-    - kwargs_list: list, 函数的关键字参数列表
+    - func: function, 要并行处理的函数(其会接收for_key_name和for_value_name作为关键字参数)
+    - args: 函数的位置参数(不推荐,因为key,value在func中的位置不确定)
+    - kwargs: 函数的关键字参数
+    - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
     只有当for循环每个之间独立时才能使用这个函数
-    '''
 
+    示例:
+    def func(k, v, x, y):
+        print(k, v, x, y)
+        
+    for_dict = {'a': 1, 'b': 2, 'c': 3}
+    multi_process_items_for(2, func, args=(), kwargs={'x': 3, 'y': 3}, for_dict=for_dict, for_key_name='k', for_value_name='v')
+    '''
+    if args is None:
+        args = ()
+    if kwargs is None:
+        kwargs = {}
     divided_key_list = split_list(list(for_dict.keys()), process_num)
     divided_value_list = split_list(list(for_dict.values()), process_num)
-    args_list = [(divided_key, divided_value, for_key_name, for_value_name)+args for divided_key, divided_value in zip(divided_key_list, divided_value_list)]
+    args_list = [(func, divided_key, divided_value, for_key_name, for_value_name)+args for divided_key, divided_value in zip(divided_key_list, divided_value_list)]
     kwargs_list = [kwargs] * process_num
-    return flatten_list(multi_process(process_num, part_items_for, args_list, kwargs_list), level=1)
+    return flatten_list(multi_process(process_num, part_items_for, args_list, kwargs_list, func_name), level=1)
 # endregion
 
 
@@ -1837,6 +2221,46 @@ def get_tag(n, case=TAG_CASE, parentheses=TAG_PARENTHESES):
         tags = ['(' + tag + ')' for tag in tags]
 
     return tags
+# endregion
+
+
+# region 浮点数处理相关函数
+def get_decimal_num(number, abs_tol=1e-5, rel_tol=1e-5):
+    """
+    计算浮点数的有效小数位数。如果某一位的小数值相对于数本身小于 tol,则从该位开始忽略。
+    
+    :param number: 输入的浮点数
+    :param abs_tol: 容忍度，决定从哪一位开始忽略，默认值为 1e-5(如果不想检测abs_tol,可以设置为None)
+    :param rel_tol: 相对容忍度，决定从哪一位开始忽略，默认值为 1e-5(如果不想检测rel_tol,可以设置为None)
+    :return: 小数位数
+    """
+    # 记录初始的小数位数
+    decimal_count = 0
+
+    # 我们循环检查小数位，逐位扩大10倍，直到发现某一位可以忽略
+    while True:
+        rounded_number = round(number, decimal_count)
+        
+        abs_break = True
+        rel_break = True
+        if abs_tol is not None:
+            if abs(rounded_number - number) > abs_tol:
+                abs_break = False
+        if rel_tol is not None:
+            if abs(rounded_number - number) > rel_tol * abs(number):
+                rel_break = False
+        if abs_break and rel_break:
+            break
+
+        # 否则继续检查下一位
+        decimal_count += 1
+    
+    return decimal_count
+
+
+def get_max_decimal_num(number_list, **kwargs):
+    decimal_count_list = [get_decimal_num(number, **kwargs) for number in number_list]
+    return max(decimal_count_list)
 # endregion
 
 
@@ -2084,6 +2508,17 @@ def update_dict(original_dict, new_dict):
         if original_dict is None:
             original_dict = {}
         return {**original_dict, **new_dict}
+
+
+def update_dict_ignore(original_dict, new_dict, ignore_value_list=None):
+    '''更新字典,忽略某些值'''
+    if ignore_value_list is None:
+        ignore_value_list = [None]
+    local_new_dict = new_dict.copy()
+    for key, value in new_dict.items():
+        if value in ignore_value_list:
+            local_new_dict.pop(key)
+    return update_dict(original_dict, local_new_dict)
 # endregion
 
 
@@ -2143,14 +2578,14 @@ def intersect_list(*lists):
     return list(intersection_set)
 
 
-def rebuild_list_with_index(original, flattened, index=0):
+def rebuild_list_with_index(flattened, original, index=0):
     '''
     以original为模板，根据flattened中的元素重新构建一个列表。其括号结构与original相同，但元素顺序与flattened相同。这个函数必须要输出index才能不断调用自己，一般而言建议使用rebuild_list作为外部的接口。
     '''
     result = []
     for item in original:
         if isinstance(item, list):
-            sub_list, index = rebuild_list_with_index(item, flattened, index)
+            sub_list, index = rebuild_list_with_index(flattened, item, index)
             result.append(sub_list)
         else:
             result.append(flattened[index])
@@ -2158,9 +2593,9 @@ def rebuild_list_with_index(original, flattened, index=0):
     return result, index
 
 
-def rebuild_list(original, flattened):
+def rebuild_list(flattened, original):
     '''以original为模板，根据flattened中的元素重新构建一个列表。其括号结构与original相同，但元素顺序与flattened相同。'''
-    return rebuild_list_with_index(original, flattened)[0]
+    return rebuild_list_with_index(flattened, original)[0]
 
 
 def pure_list(l):
@@ -2251,14 +2686,14 @@ def intersect_tuple(*tuples):
     return tuple(intersection_set)
 
 
-def rebuild_tuple_with_index(original, flattened, index=0):
+def rebuild_tuple_with_index(flattened, original, index=0):
     '''
     以original为模板，根据flattened中的元素重新构建一个元组。其括号结构与original相同，但元素顺序与flattened相同。这个函数必须要输出index才能不断调用自己，一般而言建议使用rebuild_tuple作为外部的接口。
     '''
     result = []
     for item in original:
         if isinstance(item, tuple):
-            sub_tuple, index = rebuild_tuple_with_index(item, flattened, index)
+            sub_tuple, index = rebuild_tuple_with_index(flattened, item, index)
             result.append(sub_tuple)
         else:
             result.append(flattened[index])
@@ -2266,9 +2701,9 @@ def rebuild_tuple_with_index(original, flattened, index=0):
     return tuple(result), index
 
 
-def rebuild_tuple(original, flattened):
+def rebuild_tuple(flattened, original):
     '''以original为模板，根据flattened中的元素重新构建一个元组。其括号结构与original相同，但元素顺序与flattened相同。'''
-    return rebuild_tuple_with_index(original, flattened)[0]
+    return rebuild_tuple_with_index(flattened, original)[0]
 
 
 def pure_tuple(tpl):
@@ -3053,7 +3488,7 @@ def npnan_in_list(lst):
 # endregion
 
 
-# region 数据处理相关函数(缩放、标准化、裁剪、按比例分配、划分、分bin)
+# region 数据处理相关函数(缩放、标准化、裁剪、按比例分配、划分、分bin、卷积、平滑化)
 def scale_range(min_val, max_val, prop):
     '''
     根据最小值和最大值计算扩展后的范围。
@@ -3730,6 +4165,38 @@ def convolve_multi_timeseries(multi_timeseries, kernel, mode='valid'):
         convolved_timeseries[i] = scipy.signal.convolve(multi_timeseries[i], kernel, mode=mode)
 
     return convolved_timeseries
+
+
+def lowess_smooth(x, y, frac=0.2):
+    """
+    对给定的 x 和 y 数据使用 LOWESS 进行平滑处理。函数内部会确保 x 是有序的。
+    
+    参数:
+    x (array-like): 自变量（输入）的数据。
+    y (array-like): 因变量（输出）的数据。
+    frac (float): 控制局部回归时使用的窗口大小，值越大，曲线越平滑。默认值为 0.2。
+    
+    返回:
+    x_smooth (numpy array): 平滑后的 x 数据。
+    y_smooth (numpy array): 平滑后的 y 数据。
+    """
+    # 确保是array
+    x = np.array(x)
+    y = np.array(y)
+    
+    # 确保 x 是有序的，首先对 x 和 y 进行排序
+    sort_index = np.argsort(x)
+    x_sorted = x[sort_index]
+    y_sorted = y[sort_index]
+    
+    # 使用 LOWESS 进行平滑
+    lowess_result = lowess(y_sorted, x_sorted, frac=frac)
+    
+    # 从结果中提取平滑后的 x 和 y 值
+    x_smooth = lowess_result[:, 0]
+    y_smooth = lowess_result[:, 1]
+    
+    return x_smooth, y_smooth
 # endregion
 
 
@@ -4137,7 +4604,7 @@ def get_jsd(p, q, base=None, **kwargs):
     m = (np.array(p) + np.array(q)) / 2
     return (get_kl_divergence(p, m, base=base, **kwargs) + get_kl_divergence(q, m, base=base, **kwargs)) / 2
 
-
+@to_be_improved
 def get_fft(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
     '''
     执行快速傅里叶变换 (FFT) 并返回变换后的信号
@@ -4154,27 +4621,73 @@ def get_fft(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill
     n = len(clean_timeseries)
     yf = scipy.fft.fft(clean_timeseries)
     xf = scipy.fft.fftfreq(n, T)[:n//2]
-    yf = 2.0/n * np.abs(yf[0:n//2])
+    # yf = 2.0/n * np.abs(yf[0:n//2])
+    yf = np.abs(yf[0:n//2])                   # 取前半部分的幅度
+    yf[1:] = 2.0/n * yf[1:]                   # 除直流分量外，其余乘以 2/n
+    yf[0] = yf[0] / n                         # 直流分量只需除以 n
     return xf, yf
 
 
-def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
+def get_power_spectrum(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
+    '''
+    利用welch方法计算功率谱密度并返回结果
+
+    注意: 这里的T需要以秒为单位，得到的结果才是以Hz为单位的
+    '''
+    if T is None and sample_rate is None:
+        raise ValueError("Either T or sample_rate must be provided")
+    if T is None:
+        T = 1 / sample_rate
+    clean_timeseries = process_special_value(
+        timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    f, Pxx = scipy.signal.welch(clean_timeseries, fs=1/T)
+    return f, Pxx
+
+
+def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
     '''
     计算自相关函数 (ACF) 并返回结果
     自动处理NaN值,通过线性插值填充NaN
 
     参数:
     timeseries: 一维数组,时间序列
+    nlags_policy: 'raise'或'clip','raise'表示nlags超出时间序列长度时抛出异常,'clip'表示截断nlags到时间序列长度
     '''
     if T is None and sample_rate is None:
         raise ValueError("Either T or sample_rate must be provided")
     if T is None:
         T = 1 / sample_rate
     if nlags > len(timeseries) - 1:
-        raise ValueError("nlags must be less than the length of the timeseries")
+        if nlags_policy == 'clip':
+            nlags = len(timeseries) - 1
+        elif nlags_policy == 'raise':
+            raise ValueError("nlags must be less than the length of the timeseries")
     clean_timeseries = process_special_value(
         timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
     return np.arange(nlags+1)*T, acf(clean_timeseries, nlags=nlags, fft=fft)
+
+
+def get_acovf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
+    '''
+    计算自协方差函数 (ACOVF) 并返回结果
+    自动处理NaN值,通过线性插值填充NaN
+
+    参数:
+    timeseries: 一维数组,时间序列
+    nlags_policy: 'raise'或'clip','raise'表示nlags超出时间序列长度时抛出异常,'clip'表示截断nlags到时间序列长度
+    '''
+    if T is None and sample_rate is None:
+        raise ValueError("Either T or sample_rate must be provided")
+    if T is None:
+        T = 1 / sample_rate
+    if nlags > len(timeseries) - 1:
+        if nlags_policy == 'clip':
+            nlags = len(timeseries) - 1
+        elif nlags_policy == 'raise':
+            raise ValueError("nlags must be less than the length of the timeseries")
+    clean_timeseries = process_special_value(
+        timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    return np.arange(nlags+1)*T, acovf(clean_timeseries, nlag=nlags, fft=fft)
 
 
 def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
@@ -4338,19 +4851,23 @@ def get_mode_kde(data, bandwidth='scott', grid_size=1000):
     返回:
     - mode_estimate: 估计的模态值
     """
-    # 创建核密度估计对象
-    kde = gaussian_kde(data, bw_method=bandwidth)
+    try:
+        # 创建核密度估计对象
+        kde = gaussian_kde(data, bw_method=bandwidth)
 
-    # 在数据范围内生成网格点
-    x = np.linspace(min(data), max(data), grid_size)
-    
-    # 计算每个点的密度值
-    kde_values = kde(x)
-    
-    # 找到密度值最高的点
-    mode_estimate = x[np.argmax(kde_values)]
-    
-    return mode_estimate
+        # 在数据范围内生成网格点
+        x = np.linspace(min(data), max(data), grid_size)
+        
+        # 计算每个点的密度值
+        kde_values = kde(x)
+        
+        # 找到密度值最高的点
+        mode_estimate = x[np.argmax(kde_values)]
+        
+        return mode_estimate
+    except:
+        print_title('Error: Failed to estimate the mode using KDE, returning mean instead.')
+        return np.nanmean(data)
 
 
 def repeat_data(data, repeat_times):
@@ -4645,9 +5162,11 @@ def plt_bar(ax, x, y, label=None, color=BLUE, vert=True, equal_space=False, err=
         # 将x的每个元素变为字符串
         x = [str(i) for i in x]
 
+    # 添加elabel
     if err is not None:
         add_errorbar(ax, x, y, err, vert=vert, label=elabel,
-                     color=color, capsize=capsize, ecolor=ecolor, **kwargs)
+                     color=ecolor, capsize=capsize, **kwargs)
+    
     if vert:
         # 绘制垂直柱状图
         return ax.bar(x, y, label=label, color=color, yerr=err, capsize=capsize, ecolor=ecolor, width=width, **kwargs)
@@ -4827,7 +5346,7 @@ def plt_box(ax, x, y, label=None, patch_artist=True, boxprops=None, vert=True, *
     使用x和y绘制箱形图,可以接受plt.boxplot的其他参数(和sns_box的输入方式完全不同,请注意并参考示例)
     :param ax: matplotlib的轴对象,用于绘制图形
     :param x: x轴的数据，应为一个列表或数组，其长度与y中的数据集合数量相匹配。示例:x = [1, 2, 3, 4]
-    :param y: y轴的数据，每个位置的数据应该是一个列表或数组。示例:y = [[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5, 6]]
+    :param y: y轴的数据，每个位置的数据应该是一个列表或数组。示例:y = [[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5, 6]] (注意就算画单个box,y也要是二维数组)
     :param label: 图例标签,默认为None
     :param patch_artist: 是否使用补丁对象,默认为True
     :param boxprops: 箱形图的属性
@@ -4839,9 +5358,9 @@ def plt_box(ax, x, y, label=None, patch_artist=True, boxprops=None, vert=True, *
 
     # 添加bar，用于添加图例，调整以支持横向箱形图
     if vert:
-        ax.bar([], [], color=boxprops['facecolor'], label=label, **kwargs)
+        ax.bar(x[0], 0, color=boxprops['facecolor'], label=label, bottom=y[0][0], **kwargs)
     else:
-        ax.barh([], [], olor=boxprops['facecolor'], label=label, **kwargs)
+        ax.barh(x[0], 0, color=boxprops['facecolor'], label=label, left=y[0][0], **kwargs)
 
     # 画图
     return ax.boxplot(list(y), positions=x, patch_artist=patch_artist, boxprops=boxprops, vert=vert, **kwargs)
@@ -5492,6 +6011,9 @@ def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_positi
     :param text_process: 是否对颜色条标签进行文本处理,默认为TEXT_PROCESS
     :param heatmap_kwargs: 传递给sns.heatmap的其他参数
     :param cbar_label_kwargs: 传递给颜色条标签的其他参数
+
+    注意:
+    此函数会将y轴的方向反转,即y轴的0位置在最上方
     '''
     text_process = update_dict(TEXT_PROCESS, text_process)
     cbar_kwargs = update_dict({}, cbar_kwargs)
@@ -5608,6 +6130,22 @@ def add_errorbar(ax, x, y, err, label=None, color=BLACK, linestyle='None', capsi
 # endregion
 
 
+# region 初级作图函数(添加subfig)
+def add_subfig(fig, left, right, bottom, top):
+    '''
+    在指定位置添加一个新的subfig
+
+    :param fig: matplotlib的图形对象，用于绘制图形。
+    :param left: 新subfig的左边界位置。
+    :param right: 新subfig的右边界位置。
+    :param bottom: 新subfig的下边界位置。
+    :param top: 新subfig的上边界位置。
+    '''
+    gs = GridSpec(nrows=1, ncols=1, figure=fig, left=left, right=right, bottom=bottom, top=top)
+    return get_subfig_from_gs(gs=gs)
+# endregion
+
+
 # region 初级作图函数(添加ax, zoom_in, twin_ax)
 def add_ax(fig, left, right, bottom, top, **kwargs):
     '''
@@ -5617,7 +6155,7 @@ def add_ax(fig, left, right, bottom, top, **kwargs):
     :param right: 新ax的右边界位置。
     :param bottom: 新ax的下边界位置。
     :param top: 新ax的上边界位置。
-    :param kwargs: 传递给`fig.add_axes`的其他参数。
+    :param kwargs: 传递给`fig.add_axes`的其他参数。比如sharex=some_ax, sharey=some_ax
     '''
     return fig.add_axes([left, bottom, right-left, top-bottom], **kwargs)
 
@@ -5641,7 +6179,7 @@ def add_side_ax(ax, position, relative_size, pad, sharex=None, sharey=None, hide
     '''
     在指定位置添加一个新的ax，并可以选择共享x轴或y轴。
     :param ax: matplotlib的轴对象，用于绘制图形。
-    :param position: 新ax的位置，一个四元组(x0, y0, width, height)。
+    :param position: 新ax的位置，可以是'right', 'left', 'top', 'bottom'。
     :param relative_size: 新ax的宽度或高度，相对于原ax的对应大小。
     :param pad: 新ax与原ax的间距，相对于原ax的对应大小。
     :param sharex: 与新ax共享x轴的ax对象。也可以是True，表示与原ax共享x轴。
@@ -5910,11 +6448,12 @@ def zoom_in_yrange_partial(ax, zoom_in_ax, ymin, ymax, zoom_ymin, zoom_ymax, col
         raise ValueError('connection_mode must be either "left" or "right"')
 
 
-def add_twin_ax(ax, axis):
+def add_twin_ax(ax, axis, color='black'):
     '''
     在指定轴上添加一个新的双轴。
     :param ax: matplotlib的轴对象，用于绘制图形。
     :param axis: 新双轴的位置，'x'或'y'。
+    :param color: 新双轴的颜色，默认为黑色。
 
     注意: 
     axis为'x'时,share x轴,新轴的y轴在右边;axis为'y'时,share y轴,新轴的x轴在上边。
@@ -5923,11 +6462,32 @@ def add_twin_ax(ax, axis):
     if axis == 'x':
         twin_ax = ax.twinx()
         twin_ax.set_position(ax.get_position())
+        twin_ax.spines['right'].set_visible(True)
+        twin_ax.spines['right'].set_color(color)
+        twin_ax.tick_params(axis='y', colors=color)
+        twin_ax.yaxis.label.set_color(color)
         return twin_ax
     elif axis == 'y':
         twin_ax = ax.twiny()
         twin_ax.set_position(ax.get_position())
+        twin_ax.spines['top'].set_visible(True)
+        twin_ax.spines['top'].set_color(color)
+        twin_ax.tick_params(axis='x', colors=color)
+        twin_ax.xaxis.label.set_color(color)
         return twin_ax
+# endregion
+
+
+# region 初级作图函数(删除ax, 设置ax不可见)
+def rm_ax(ax):
+    """删除指定的Axes对象"""
+    fig = ax.figure  # 获取 Axes 所属的 Figure
+    fig.delaxes(ax)  # 从 Figure 中删除 Axes
+
+
+def set_ax_invisible(ax):
+    """设置指定的Axes对象不可见"""
+    ax.set_visible(False)
 # endregion
 
 
@@ -5954,39 +6514,58 @@ def add_connection(axA, axB, xA, yA, xB, yB, coordsA='data', coordsB='data', **k
 
 
 # region 初级作图函数(ax视角相关)
-def set_ax_view_3d(ax, elev=ELEV, azim=AZIM):
+def set_ax_view_3d(axs, elev=ELEV, azim=AZIM):
     '''
     对单个或多个3D子图Axes应用统一的视角设置。
 
     参数:
-    - ax: 单个Axes实例或包含多个Axes实例的数组。
+    - axs: 单个Axes,或者np.ndarray,list,dict
     - elev: 视角的高度。
     - azim: 视角的方位角。
     '''
-    # 如果ax是Axes实例的列表或数组
-    if isinstance(ax, (list, np.ndarray)):
-        for ax_i in np.ravel(ax):  # 使用np.ravel确保可以迭代所有可能的结构
-            if isinstance(ax_i, Axes3D):
-                ax_i.view_init(elev=elev, azim=azim)
-    # 如果ax是单个Axes实例
-    elif isinstance(ax, Axes3D):
-        ax.view_init(elev=elev, azim=azim)
+    axs = get_iterable_ax(axs)
+    for ax in axs:
+        if isinstance(ax, Axes3D):
+            ax.view_init(elev=elev, azim=azim)
 # endregion
 
 
 # region 初级作图函数(ax位置相关)
 @direct_use
 def get_ax_position(ax):
-    '''
-    获取轴的位置。
-    
+    """
+    获取 Matplotlib Axes 对象的位置信息。
+
     参数:
-    - ax: matplotlib的Axes对象
-    '''
+    ax (matplotlib.axes.Axes): 需要获取位置信息的 Axes 对象。
+
+    返回:
+    tuple: 包含 Axes 对象位置信息的 4 元组, 格式为 (left, bottom, width, height)。
+        其中 left 和 bottom 表示 Axes 对象在图像中的左下角坐标,
+        width 和 height 表示 Axes 对象的宽度和高度。
+        这些值都是相对于图像大小的比例值,范围在 0 到 1 之间。
+    """
     return ax.get_position().bounds
 
+@direct_use
+def set_ax_position(ax, left, bottom, width, height):
+    '''
+    设置轴的位置。
+    '''
+    ax.set_position([left, bottom, width, height])
 
-def set_ax_position(ax, left, right, bottom, top):
+
+def get_ax_position_custom(ax):
+    '''
+        更加人性化,返回left, right, bottom, top
+    '''
+    left, bottom, width, height = ax.get_position().bounds
+    right = left + width
+    top = bottom + height
+    return left, right, bottom, top
+
+
+def set_ax_position_custom(ax, left, right, bottom, top):
     '''
     设置轴的位置。
 
@@ -6000,7 +6579,7 @@ def set_ax_position(ax, left, right, bottom, top):
     ax.set_position([left, bottom, right - left, top - bottom])
 
 
-def set_relative_ax_position(ax, nrows=1, ncols=1, margin=None):
+def set_relative_ax_position(ax, nrows=1, ncols=1, margin=None, squeeze=False):
     '''
     自动设置subplot的位置，使其在等分的图像中按照给定的比例占据空间。
 
@@ -6009,6 +6588,7 @@ def set_relative_ax_position(ax, nrows=1, ncols=1, margin=None):
     - ncols: 子图的列数。
     - ax: 一个或一组matplotlib的Axes对象。
     - margin: 一个字典，定义了图像边缘的留白，包括left, right, bottom, top。
+    - squeeze: ax是否被压缩,squeeze为True时,对于单个ax其就是axes对象;squeeze为False时,对于单个ax其是一个(1,1)的np.ndarray对象
     '''
     if margin is None:
         margin = MARGIN.copy()
@@ -6036,55 +6616,110 @@ def set_relative_ax_position(ax, nrows=1, ncols=1, margin=None):
             bottom = margin['bottom']
 
             # 设置子图的位置
-            ax[col].set_position([left, bottom, ax_width, ax_height])
+            if squeeze:
+                ax[col].set_position([left, bottom, ax_width, ax_height])
+            else:
+                ax[0, col].set_position([left, bottom, ax_width, ax_height])
     if nrows > 1 and ncols == 1:
         for row in range(nrows):
             left = margin['left']
             bottom = margin['bottom'] / nrows + (nrows - row - 1) * subplot_height
 
             # 设置子图的位置
-            ax[row].set_position([left, bottom, ax_width, ax_height])
+            if squeeze:
+                ax[row].set_position([left, bottom, ax_width, ax_height])
+            else:
+                ax[row, 0].set_position([left, bottom, ax_width, ax_height])
     if nrows == 1 and ncols == 1:
         left = margin['left']
         bottom = margin['bottom']
 
         # 设置子图的位置
-        ax.set_position([left, bottom, ax_width, ax_height])
+        if squeeze:
+            ax.set_position([left, bottom, ax_width, ax_height])
+        else:
+            ax[0, 0].set_position([left, bottom, ax_width, ax_height])
 
     return ax
 
 
-def align_ax(axs, ref_ax, align_mode='horizontal'):
+def align_ax(axs, ref_ax, align_mode='horizontal', keep_size=False):
     '''
     将axs中ax的position对齐到ref_ax的position
     align_mode:
         'horizontal', 'vertical' - 改变高度和宽度,horizontal则左右对齐(ax的上下框对齐),vertical则上下对齐(ax的左右框对齐)
         'left', 'right', 'top', 'bottom' - 不改变高度和宽度,只改变位置去对齐到需要的位置
+        'all' - 改变高度和宽度,同时改变位置去对齐到需要的位置(即直接对齐到ref_ax的position)
+    keep_size: 是否保持ax的大小不变,默认为False,即改变大小(其他点固定,拉伸至指定点);假如为True,则保持大小,只改变位置(平移)
     '''
-    if align_mode == 'horizontal':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([ax.get_position().x0, pos.y0, ax.get_position().width, pos.height])
-    elif align_mode == 'vertical':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([pos.x0, ax.get_position().y0, pos.width, ax.get_position().height])
-    elif align_mode == 'left':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([pos.x0, ax.get_position().y0, ax.get_position().width, ax.get_position().height])
-    elif align_mode == 'right':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([pos.x0 + pos.width - ax.get_position().width, ax.get_position().y0, ax.get_position().width, ax.get_position().height])
-    elif align_mode == 'top':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([ax.get_position().x0, pos.y0 + pos.height - ax.get_position().height, ax.get_position().width, ax.get_position().height])
-    elif align_mode == 'bottom':
-        for ax in axs:
-            pos = ref_ax.get_position()
-            ax.set_position([ax.get_position().x0, pos.y0, ax.get_position().width, ax.get_position().height])
+    axs = get_iterable_ax(axs)
+    if align_mode == 'horizontal' or align_mode == 'vertical' or align_mode == 'all':
+        if keep_size:
+            print('may not be able to keep size when align_mode is horizontal or vertical')
+    ref_pos_left, ref_pos_right, ref_pos_bottom, ref_pos_top = get_ax_position_custom(ref_ax)
+    for ax in axs:
+        pos_left, pos_right, pos_bottom, pos_top = get_ax_position_custom(ax)
+        pos_width = pos_right - pos_left
+        pos_height = pos_top - pos_bottom
+        if align_mode == 'horizontal':
+            pos_top = ref_pos_top
+            pos_bottom = ref_pos_bottom
+        if align_mode == 'vertical':
+            pos_left = ref_pos_left
+            pos_right = ref_pos_right
+        if align_mode == 'all':
+            pos_left = ref_pos_left
+            pos_right = ref_pos_right
+            pos_bottom = ref_pos_bottom
+            pos_top = ref_pos_top
+        if align_mode == 'left':
+            pos_left = ref_pos_left
+            if keep_size:
+                pos_right = pos_left + pos_width
+        if align_mode == 'right':
+            pos_right = ref_pos_right
+            if keep_size:
+                pos_left = pos_right - pos_width
+        if align_mode == 'top':
+            pos_top = ref_pos_top
+            if keep_size:
+                pos_bottom = pos_top - pos_height
+        if align_mode == 'bottom':
+            pos_bottom = ref_pos_bottom
+            if keep_size:
+                pos_top = pos_bottom + pos_height
+        set_ax_position_custom(ax, pos_left, pos_right, pos_bottom, pos_top)
+
+
+def move_ax(ax, d_left=None, d_right=None, d_bottom=None, d_top=None, keep_size=False):
+    '''
+    向某个方向移动ax的位置
+
+    参数:
+    -keep_size: 是否保持ax的大小不变,默认为False,即改变大小(其他点固定,拉伸至指定点);假如为True,则保持大小,只改变位置(平移)
+    '''
+    left, right, bottom, top = get_ax_position_custom(ax)
+    if keep_size:
+        position_array = np.array([left, right, bottom, top])
+        if d_left is not None:
+            position_array -= d_left
+        if d_right is not None:
+            position_array += d_right
+        if d_bottom is not None:
+            position_array -= d_bottom
+        if d_top is not None:
+            position_array += d_top
+        left, right, bottom, top = position_array
+    else:
+        if d_left is not None:
+            left -= d_left
+        if d_right is not None:
+            right -= d_right
+        if d_bottom is not None:
+            bottom -= d_bottom
+        if d_top is not None:
+            top -= d_top
+    set_ax_position_custom(ax, left, right, bottom, top)
 # endregion
 
 
@@ -6117,6 +6752,7 @@ def convert_ax_to_3d(ax):
 
 
 # region 初级作图函数(分割ax)
+@deprecated
 def split_ax(ax, orientation='horizontal', pad=SIDE_PAD, ratio=0.5, sharex=None, sharey=None, keep_original_ax=False):
     '''
     分割给定的轴对象ax为两个部分，根据指定的方向、间距和共享轴设置。
@@ -6199,13 +6835,21 @@ def split_ax(ax, orientation='horizontal', pad=SIDE_PAD, ratio=0.5, sharex=None,
 
         return ax0, ax1
 
+@deprecated
+def split_ax_multi():
+    print('just use split_ax_by_gs')
 
-def split_quadrant_relocate_ax(ax, x_side_ax_position, y_side_ax_position, x_side_ax_size, y_side_ax_size, x_side_ax_pad, y_side_ax_pad):
+
+def split_quadrant_ax(ax, x_side_ax_position='top', y_side_ax_position='right', x_side_ax_size=0.3, y_side_ax_size=0.3, x_side_ax_pad=SIDE_PAD, y_side_ax_pad=SIDE_PAD, sharex=False, sharey=False):
     '''
-    将给定的轴对象ax分割为四个部分，并重新定位原始轴对象。
+    将给定的轴对象ax分割为四个部分(适用于添加边缘分布的需要)
     '''
     fig = ax.get_figure()
-    pos = ax.get_position()
+    if share_x:
+        share_x = ax
+    if share_y:
+        share_y = ax
+
     if x_side_ax_position == 'top':
         height_ratios = [x_side_ax_size, 1 - x_side_ax_size]
     elif x_side_ax_position == 'bottom':
@@ -6214,52 +6858,286 @@ def split_quadrant_relocate_ax(ax, x_side_ax_position, y_side_ax_position, x_sid
         width_ratios = [y_side_ax_size, 1 - y_side_ax_size]
     elif y_side_ax_position == 'right':
         width_ratios = [1 - y_side_ax_size, y_side_ax_size]
-    gs = GridSpec(2, 2, figure=fig, left=pos.x0, right=pos.x1, bottom=pos.y0, top=pos.y1, wspace=x_side_ax_pad, hspace=y_side_ax_pad, width_ratios=width_ratios, height_ratios=height_ratios)
+
+    gs = get_gs_inside_ax(ax, ncols=2, nrows=2, width_ratios=width_ratios, height_ratios=height_ratios, wspace=x_side_ax_pad, hspace=y_side_ax_pad)
+
     if x_side_ax_position == 'top' and y_side_ax_position == 'right':
         new_ax = fig.add_subplot(gs[1, 0])
-        x_side_ax = fig.add_subplot(gs[0, 0], sharex=ax)
-        y_side_ax = fig.add_subplot(gs[1, 1], sharey=ax)
+        x_side_ax = fig.add_subplot(gs[0, 0], sharex=sharex)
+        y_side_ax = fig.add_subplot(gs[1, 1], sharey=sharey)
     if x_side_ax_position == 'top' and y_side_ax_position == 'left':
         new_ax = fig.add_subplot(gs[1, 1])
-        x_side_ax = fig.add_subplot(gs[0, 1], sharex=ax)
-        y_side_ax = fig.add_subplot(gs[1, 0], sharey=ax)
+        x_side_ax = fig.add_subplot(gs[0, 1], sharex=sharex)
+        y_side_ax = fig.add_subplot(gs[1, 0], sharey=sharey)
     if x_side_ax_position == 'bottom' and y_side_ax_position == 'right':
         new_ax = fig.add_subplot(gs[0, 0])
-        x_side_ax = fig.add_subplot(gs[1, 0], sharex=ax)
-        y_side_ax = fig.add_subplot(gs[0, 1], sharey=ax)
+        x_side_ax = fig.add_subplot(gs[1, 0], sharex=sharex)
+        y_side_ax = fig.add_subplot(gs[0, 1], sharey=sharey)
     if x_side_ax_position == 'bottom' and y_side_ax_position == 'left':
         new_ax = fig.add_subplot(gs[0, 1])
-        x_side_ax = fig.add_subplot(gs[1, 1], sharex=ax)
-        y_side_ax = fig.add_subplot(gs[0, 0], sharey=ax)
+        x_side_ax = fig.add_subplot(gs[1, 1], sharex=sharex)
+        y_side_ax = fig.add_subplot(gs[0, 0], sharey=sharey)
+    rm_ax(ax)
+    return new_ax, x_side_ax, y_side_ax
 
-    new_ax.set_visible(False)
-    ax.set_position(new_ax.get_position())
-    return x_side_ax, y_side_ax
+
+def split_ax_by_gs(ax, nrows=1, ncols=1, wspace=None, hspace=None, width_ratios=None, height_ratios=None, sharex=False, sharey=False, squeeze=True, keep_original=False, **kwargs):
+    '''
+    在ax的位置为基础获取一个GridSpec对象,然后根据GridSpec对象获取所有的ax对象。可以用于切分ax。
+
+    参数:
+    -keep_original: 是否保留原始的ax,默认为False,即不保留(将会被rm);如果为True,则会保留原始的ax;如果为index,则会将原先的ax放在返回的ax中的index位置
+    '''
+    gs = get_gs_inside_ax(ax, nrows=nrows, ncols=ncols, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
+    sub_ax = get_all_ax_from_gs(gs, sharex=sharex, sharey=sharey, squeeze=squeeze, **kwargs)
+    if keep_original is True:
+        # 不做处理
+        pass
+    elif keep_original is False:
+        rm_ax(ax)
+    else:
+        # 重新share_axis到original_ax(此时不支持row,col)
+        if sharex in ['row', 'col'] or sharey in ['row', 'col']:
+            print('sharex or sharey can not be row or col in keep_original mode')
+        sub_ax = share_axis_to_target(sub_ax, ax, sharex=sharex, sharey=sharey)
+        # 将orginal_ax在图中放到index的ax所处的位置
+        align_ax(ax, sub_ax[keep_original], align_mode='all')
+        # 将sub_ax[keep_original]移除
+        rm_ax(sub_ax[keep_original])
+        # 将original_ax替换到sub_ax中
+        sub_ax[keep_original] = ax
+    return sub_ax
+# endregion
+
+
+# region 初级作图函数(合并ax)
+def merge_ax(axs, rm_mode='rm_axis'):
+    '''
+        合并给定的轴对象列表或数组为一个轴对象。
+
+        :param axs: 要合并的轴对象列表或数组
+        :param rm_mode: 是否删除原始的轴对象，默认为'rm_axis'，即删除原始的轴对象;假如为'rm_ax',则删除整个ax
+    '''
+    axs = get_iterable_ax(axs)
+    for ax in axs:
+        # 删除原始的ax
+        # ax.get_figure().delaxes(ax)
+        if rm_mode == 'rm_axis':
+            rm_ax_axis(ax)
+        elif rm_mode == 'rm_ax':
+            rm_ax(ax)
+    left = get_extreme_ax_position(axs, 'left')
+    right = get_extreme_ax_position(axs, 'right')
+    bottom = get_extreme_ax_position(axs, 'bottom')
+    top = get_extreme_ax_position(axs, 'top')
+    return add_ax(fig=axs[0].get_figure(), left=left, right=right, bottom=bottom, top=top)
 # endregion
 
 
 # region 初级作图函数(获取多个ax的位置的极值)
-def get_extreme_ax_position(*args, position):
+def get_extreme_ax_position(axs, position):
     '''
     获取多个ax的位置的极值。
-    :param args: 多个ax对象。
+    :param axs: 多个ax对象。
     :param position: 位置参数，可选'left', 'right', 'top', 'bottom'。
     '''
+    axs = get_iterable_ax(axs)
     if position not in ['left', 'right', 'top', 'bottom']:
         raise ValueError('position参数错误')
     if position == 'left':
-        return min([ax.get_position().x0 for ax in args])
+        return min([ax.get_position().x0 for ax in axs])
     elif position == 'right':
-        return max([ax.get_position().x1 for ax in args])
+        return max([ax.get_position().x1 for ax in axs])
     elif position == 'top':
-        return max([ax.get_position().y1 for ax in args])
+        return max([ax.get_position().y1 for ax in axs])
     elif position == 'bottom':
-        return min([ax.get_position().y0 for ax in args])
+        return min([ax.get_position().y0 for ax in axs])
+# endregion
+
+
+# region 初级作图函数(locator)
+def set_ax_locator(ax, locator, axis='both', locator_type='major'):
+    if axis == 'both':
+        axis = ['x', 'y']
+    if isinstance(axis, str):
+        axis = [axis]
+    if locator_type == 'major':
+        for tick in axis:
+            if tick == 'x':
+                ax.xaxis.set_major_locator(locator)
+            elif tick == 'y':
+                ax.yaxis.set_major_locator(locator)
+    elif locator_type == 'minor':
+        for tick in axis:
+            if tick == 'x':
+                ax.xaxis.set_minor_locator(locator)
+            elif tick == 'y':
+                ax.yaxis.set_minor_locator(locator)
+
+
+def set_ax_max_n_locator(ax, nbins, axis='both', locator_type='major', **kwargs):
+    locator = ticker.MaxNLocator(nbins, **kwargs)
+    set_ax_locator(ax, locator, axis=axis, locator_type=locator_type)
+
+
+def set_ax_linear_locator(ax, numticks, axis='both', locator_type='major', **kwargs):
+    '''
+    会从min到max均匀分布的设置刻度(不实用,因为min有可能带有很多小数位数)
+    '''
+    locator = ticker.LinearLocator(numticks, **kwargs)
+    set_ax_locator(ax, locator, axis=axis, locator_type=locator_type)
+
+
+def set_ax_multiple_locator(ax, base, offset=0., axis='both', locator_type='major', **kwargs):
+    '''
+    会从base的倍数开始设置刻度
+    '''
+    locator = ticker.MultipleLocator(base, offset=offset, **kwargs)
+    set_ax_locator(ax, locator, axis=axis, locator_type=locator_type)
 # endregion
 
 
 # region 初级作图函数(formatter)
+def get_linear_but_log_formatter(base='10', label_format='auto'):
+    '''
+    假如散点等元素是log后作画的,ax本身的scale是linear,则使用这个formatter可以把tick显示为log的形式。
+    base: 指数的底数,默认是10。
+    label_format: 控制指数部分的格式，例如 '%.0f' 表示整数形式,'%.2f' 表示保留两位小数。默认是'auto'，即自动选择。
+    '''
+    def linear_but_log_formatter(x, pos):
+        if label_format == 'auto':
+            decimal_num = get_decimal_num(x)
+            local_label_format = '%.' + str(decimal_num) + 'f'
+        else:
+            local_label_format = label_format
+        return r"${}^{{{}}}$".format(base, local_label_format % x)
+    
+    return FuncFormatter(linear_but_log_formatter)
 
+
+def set_linear_but_log_axis(ax, axis=None, base='10', label_format='auto'):
+    '''
+    注意:最好放在set ax后,不然有可能小数点的估计会错误
+    '''
+    if axis is None:
+        axis = ['x', 'y']
+    if isinstance(axis, str):
+        axis = [axis]
+    for axi in axis:
+        if axi == 'x':
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(ax.get_xticks())
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+            ax.xaxis.set_major_formatter(get_linear_but_log_formatter(base=base, label_format=local_label_format))
+        if axi == 'y':
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(ax.get_yticks())
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+            ax.yaxis.set_major_formatter(get_linear_but_log_formatter(base=base, label_format=local_label_format))
+
+
+def get_log_e_formatter(label_format='auto'):
+    '''
+    假设ax本身的scale是log的并且base为e,则使用这个formatter可以把tick显示为e的形式(否则会有很多小数点)
+    label_format: 控制指数部分的格式，例如 '%.0f' 表示整数形式,'%.2f' 表示保留两位小数。默认是'auto'，即自动选择。
+    '''
+    def log_e_formatter(x, pos):
+        if label_format == 'auto':
+            decimal_num = get_decimal_num(np.log(x))
+            local_label_format = '%.' + str(decimal_num) + 'f'
+        else:
+            local_label_format = label_format
+        return r"$e^{{{}}}$".format(local_label_format % np.log(x))
+    
+    return FuncFormatter(log_e_formatter)
+
+
+def set_log_e_axis(ax, axis=None, label_format='auto'):
+    '''
+    注意:最好放在set ax后,不然有可能小数点的估计会错误
+    '''
+    if axis is None:
+        axis = ['x', 'y']
+    if isinstance(axis, str):
+        axis = [axis]
+    for axi in axis:
+        if axi == 'x':
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(np.log(ax.get_xticks()))
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+            ax.xaxis.set_major_formatter(get_log_e_formatter(label_format=local_label_format))
+        if axi == 'y':
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(np.log(ax.get_yticks()))
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+            ax.yaxis.set_major_formatter(get_log_e_formatter(label_format=local_label_format))
+
+
+def get_sym_positive_formatter(label_format='auto'):
+    '''
+    获取对称正数的formatter
+    '''
+    def sym_positive_formatter(x, pos):
+        if label_format == 'auto':
+            decimal_num = get_decimal_num(x)
+            local_label_format = '%.' + str(decimal_num) + 'f'
+        else:
+            local_label_format = label_format
+        return local_label_format % abs(x)
+    return FuncFormatter(sym_positive_formatter)
+
+
+def set_sym_positive_axis(ax, axis=None, bound=None, label_format='auto'):
+    '''
+    将轴设置为对称正数
+    '''
+    if axis is None:
+        axis = ['x', 'y']
+    if isinstance(axis, str):
+        axis = [axis]
+    for axi in axis:
+        if axi == 'x':
+            # 将x轴设置为对称
+            try:
+                if bound is None:
+                    bound = max(abs(ax.get_xlim()))
+                ax.set_xlim(-bound, bound)
+            except:
+                pass
+
+            # 获取label_format
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(ax.get_xticks())
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+
+            ax.xaxis.set_major_formatter(get_sym_positive_formatter(label_format=local_label_format))
+        if axi == 'y':
+            # 将y轴设置为对称
+            try:
+                if bound is None:
+                    bound = max(abs(ax.get_ylim()))
+                ax.set_ylim(-bound, bound)
+            except:
+                pass
+
+            # 获取label_format
+            if label_format == 'auto':
+                max_decimal_num = get_max_decimal_num(ax.get_yticks())
+                local_label_format = '%.' + str(max_decimal_num) + 'f'
+            else:
+                local_label_format = label_format
+
+            ax.yaxis.set_major_formatter(get_sym_positive_formatter(label_format=local_label_format))
 # endregion
 
 
@@ -6376,13 +7254,12 @@ def scale_cmap(cmap, vmin, vmax):
     return new_cmap
 
 
-def reverse_cmap(cmap, continuous=True):
+def reverse_cmap(cmap):
     '''
     反转颜色映射。
     :param cmap: 颜色映射。
     '''
-    color_data = cmap(np.linspace(0, 1, cmap.N))
-    return get_cmap(color_data[::-1], continuous=continuous)
+    return cmap.reversed()
 
 @message_decorator('use boundary norm in plt instead')
 def discretize_cmap(cmap, discrete_num):
@@ -6820,7 +7697,7 @@ def add_side_scatter_colorbar(ax, mappable=None, cmap=CMAP, edgecolor=BLACK, tic
 
 
 # region 初级作图函数(添加边缘分布)
-def add_marginal_distribution(ax, data, side_ax_position, side_ax_pad=SIDE_PAD, side_ax_size=0.3, outside=True, color=BLUE, hist=True, stat='density', bins=BIN_NUM, hist_kwargs=None, kde=True, kde_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
+def add_marginal_distribution(ax, data, side_ax=None, side_ax_position='right', side_ax_pad=SIDE_PAD, side_ax_size=0.3, outside=True, color=BLUE, hist=True, stat='density', bins=BIN_NUM, hist_kwargs=None, kde=True, kde_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
     '''
     在指定位置添加边缘分布。
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -6842,16 +7719,17 @@ def add_marginal_distribution(ax, data, side_ax_position, side_ax_pad=SIDE_PAD, 
         hist_vert = True
 
     # 得到边缘分布需要的ax
-    if outside:
-        if side_ax_position in ['right', 'left']:
-            side_ax = add_side_ax(ax, side_ax_position, side_ax_size, side_ax_pad, sharey=True)
-        elif side_ax_position in ['top', 'bottom']:
-            side_ax = add_side_ax(ax, side_ax_position, side_ax_size, side_ax_pad, sharex=True)
-    else:
-        if side_ax_position in ['right', 'bottom']:
-            side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=1-side_ax_size, sharex=True if side_ax_position == 'bottom' else False, sharey=True if side_ax_position == 'right' else False, keep_original_ax='top' if side_ax_position == 'bottom' else 'left')
-        elif side_ax_position in ['left', 'top']:
-            side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=side_ax_size, sharex=True if side_ax_position == 'top' else False, sharey=True if side_ax_position == 'left' else False, keep_original_ax='bottom' if side_ax_position == 'top' else 'right')
+    if side_ax is None:
+        if outside:
+            if side_ax_position in ['right', 'left']:
+                side_ax = add_side_ax(ax, side_ax_position, side_ax_size, side_ax_pad, sharey=True)
+            elif side_ax_position in ['top', 'bottom']:
+                side_ax = add_side_ax(ax, side_ax_position, side_ax_size, side_ax_pad, sharex=True)
+        else:
+            if side_ax_position in ['right', 'bottom']:
+                side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=1-side_ax_size, sharex=True if side_ax_position == 'bottom' else False, sharey=True if side_ax_position == 'right' else False, keep_original_ax='top' if side_ax_position == 'bottom' else 'left')
+            elif side_ax_position in ['left', 'top']:
+                side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=side_ax_size, sharex=True if side_ax_position == 'top' else False, sharey=True if side_ax_position == 'left' else False, keep_original_ax='bottom' if side_ax_position == 'top' else 'right')
 
     # 绘制边缘分布
     if hist:
@@ -6881,7 +7759,7 @@ def add_marginal_distribution(ax, data, side_ax_position, side_ax_pad=SIDE_PAD, 
     return side_ax
 
 
-def add_double_marginal_distribution(ax, x, y, outside=True, x_side_ax_position='top', y_side_ax_position='right', x_side_ax_pad=SIDE_PAD, y_side_ax_pad=SIDE_PAD, x_side_ax_size=0.3, y_side_ax_size=0.3, x_color=BLUE, y_color=BLUE, hist=True, stat='density', x_bins=BIN_NUM, y_bins=BIN_NUM, x_hist_kwargs=None, y_hist_kwargs=None, kde=True, x_kde_kwargs=None, y_kde_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
+def add_double_marginal_distribution(ax, x, y, x_side_ax=None, y_side_ax=None, outside=True, x_side_ax_position='top', y_side_ax_position='right', x_side_ax_pad=SIDE_PAD, y_side_ax_pad=SIDE_PAD, x_side_ax_size=0.3, y_side_ax_size=0.3, x_color=BLUE, y_color=BLUE, hist=True, stat='density', x_bins=BIN_NUM, y_bins=BIN_NUM, x_hist_kwargs=None, y_hist_kwargs=None, kde=True, x_kde_kwargs=None, y_kde_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
     '''
     在指定位置添加两个方向的边缘分布。
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -6919,11 +7797,12 @@ def add_double_marginal_distribution(ax, x, y, outside=True, x_side_ax_position=
     
     # 添加边缘分布
     if outside:
-        x_side_ax = add_marginal_distribution(ax, x, x_side_ax_position, side_ax_pad=x_side_ax_pad, side_ax_size=x_side_ax_size, outside=outside, color=x_color, hist=hist, stat=stat, bins=x_bins, hist_kwargs=x_hist_kwargs, kde=kde, kde_kwargs=x_kde_kwargs, rm_tick=rm_tick, rm_spine=rm_spine, rm_axis=rm_axis)
-        y_side_ax = add_marginal_distribution(ax, y, y_side_ax_position, side_ax_pad=y_side_ax_pad, side_ax_size=y_side_ax_size, outside=outside, color=y_color, hist=hist, stat=stat, bins=y_bins, hist_kwargs=y_hist_kwargs, kde=kde, kde_kwargs=y_kde_kwargs, rm_tick=rm_tick, rm_spine=rm_spine, rm_axis=rm_axis)
+        x_side_ax = add_marginal_distribution(ax, x, x_side_ax, x_side_ax_position, side_ax_pad=x_side_ax_pad, side_ax_size=x_side_ax_size, outside=outside, color=x_color, hist=hist, stat=stat, bins=x_bins, hist_kwargs=x_hist_kwargs, kde=kde, kde_kwargs=x_kde_kwargs, rm_tick=rm_tick, rm_spine=rm_spine, rm_axis=rm_axis)
+        y_side_ax = add_marginal_distribution(ax, y, y_side_ax, y_side_ax_position, side_ax_pad=y_side_ax_pad, side_ax_size=y_side_ax_size, outside=outside, color=y_color, hist=hist, stat=stat, bins=y_bins, hist_kwargs=y_hist_kwargs, kde=kde, kde_kwargs=y_kde_kwargs, rm_tick=rm_tick, rm_spine=rm_spine, rm_axis=rm_axis)
     else:
-        # 当边缘分布在内部时，需要手动分划ax然后获取需要的
-        x_side_ax, y_side_ax = split_quadrant_relocate_ax(ax, x_side_ax_position=x_side_ax_position, y_side_ax_position=y_side_ax_position, x_side_ax_size=x_side_ax_size, y_side_ax_size=y_side_ax_size, x_side_ax_pad=x_side_ax_pad, y_side_ax_pad=y_side_ax_pad)
+        if x_side_ax is None and y_side_ax is None:
+            # 当边缘分布在内部时，需要手动分划ax然后获取需要的
+            ax, x_side_ax, y_side_ax = split_quadrant_ax(ax, x_side_ax_position=x_side_ax_position, y_side_ax_position=y_side_ax_position, x_side_ax_size=x_side_ax_size, y_side_ax_size=y_side_ax_size, x_side_ax_pad=x_side_ax_pad, y_side_ax_pad=y_side_ax_pad, sharex=True, sharey=True)
         # 绘制边缘分布
         if hist:
             plt_hist(ax=x_side_ax, data=x, bins=x_bins, color=x_color, stat=stat, vert=True, **x_hist_kwargs)
@@ -6932,24 +7811,24 @@ def add_double_marginal_distribution(ax, x, y, outside=True, x_side_ax_position=
             plt_kde(ax=x_side_ax, data=x, color=x_color, vert=True, **x_kde_kwargs)
             plt_kde(ax=y_side_ax, data=y, color=y_color, vert=False, **y_kde_kwargs)
 
-        # 隐藏边缘分布的刻度和坐标轴
-        if rm_tick:
-            # rm_ax_tick(x_side_ax, 'y')
-            # rm_ax_tick(y_side_ax, 'x')
-            rm_ax_tick(x_side_ax)
-            rm_ax_tick(y_side_ax)
-        if rm_spine:
-            rm_ax_spine(x_side_ax)
-            rm_ax_spine(y_side_ax)
-        if rm_axis:
-            rm_ax_axis(x_side_ax)
-            rm_ax_axis(y_side_ax)
+    # 隐藏边缘分布的刻度和坐标轴
+    if rm_tick:
+        # rm_ax_tick(x_side_ax, 'y')
+        # rm_ax_tick(y_side_ax, 'x')
+        rm_ax_tick(x_side_ax)
+        rm_ax_tick(y_side_ax)
+    if rm_spine:
+        rm_ax_spine(x_side_ax)
+        rm_ax_spine(y_side_ax)
+    if rm_axis:
+        rm_ax_axis(x_side_ax)
+        rm_ax_axis(y_side_ax)
 
-        # 调整边缘分布的方向
-        if x_side_ax_position == 'bottom':
-            x_side_ax.invert_yaxis()
-        if y_side_ax_position == 'left':
-            y_side_ax.invert_xaxis()
+    # 调整边缘分布的方向
+    if x_side_ax_position == 'bottom':
+        x_side_ax.invert_yaxis()
+    if y_side_ax_position == 'left':
+        y_side_ax.invert_xaxis()
     return x_side_ax, y_side_ax
 # endregion
 
@@ -7053,7 +7932,7 @@ def add_hline(ax, y, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, line
     return ax.axhline(y, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
 
 
-def add_sline(ax, slope, intercept, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
+def add_sline(ax, slope, intercept, reference_point='auto', label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
     '''
     按照斜率和截距添加直线。(贯穿整个ax)
 
@@ -7061,13 +7940,17 @@ def add_sline(ax, slope, intercept, label=None, color=RED, linestyle=AUXILIARY_L
     :param ax: matplotlib的轴对象，用于绘制图形。
     :param slope: 直线的斜率。
     :param intercept: 直线的截距。
+    :param reference_point: 直线的参考点，默认为'auto'。可输入浮点数
     :param label: 直线的标签，默认为None。
     :param color: 直线的颜色，默认为RED。
     :param linestyle: 直线的线型，默认为AUXILIARY_LINE_STYLE。
     :param linewidth: 直线的线宽，默认为LINE_WIDTH。
     :param kwargs: 传递给`ax.axline`的额外关键字参数。
     '''
-    return ax.axline((0, intercept), slope=slope, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
+    if reference_point == 'auto':
+        reference_point = (ax.get_xlim()[0] + ax.get_xlim()[1]) / 2
+    reference_intercept = slope * reference_point + intercept
+    return ax.axline((reference_point, reference_intercept), slope=slope, label=label, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
 
 
 def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
@@ -7105,6 +7988,152 @@ def add_hspan(ax, ymin, ymax, label=None, color=GREEN, alpha=FAINT_ALPHA, **kwar
     '''
     # 画图
     return ax.axhspan(ymin, ymax, label=label, color=color, alpha=alpha, **kwargs)
+
+
+def add_span(ax, color=GREEN, alpha=FAINT_ALPHA, **kwargs):
+    '''
+    将整个图像区域涂色。
+    '''
+    # 画图
+    color_a = rgb_to_rgba(color, alpha)
+    return ax.set_facecolor(color_a)
+# endregion
+
+
+# region 初级作图函数(创建patch)
+def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, vert=True, cmap=DENSITY_CMAP):
+    '''
+    创建一个渐变色的patch。
+
+    参数:
+    - ax: matplotlib的Axes对象,用于绘制图形
+    - patch: matplotlib的Patch对象,用于裁剪渐变色
+    - extent: patch的范围,为(xmin, xmax, ymin, ymax)
+    - transform: patch的坐标系,默认为None即ax坐标系
+    - auto_scale: 是否自动调整坐标轴范围,默认为True
+    - vert: 渐变色的方向,默认为True即垂直方向
+    - cmap: 渐变色的颜色映射,默认为DENSITY_CMAP
+    '''
+    if transform == 'data':
+        transform = ax.transData
+
+    # 创建渐变数组
+    gradient = np.linspace(0, 1, 256).reshape(1, -1)
+    gradient = np.vstack((gradient, gradient))  # 扩展到2行
+    if vert:
+        gradient = gradient.T  # 垂直方向上的渐变
+
+    # 在 ax 中绘制渐变色
+    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=extent, transform=transform)
+
+    # 裁剪渐变色
+    im.set_clip_path(patch)
+
+    # 自动缩放视图
+    if auto_scale:
+        ax.autoscale_view()
+
+
+def add_patch(ax, patch, auto_scale=True):
+    '''
+    在ax上添加patch。
+
+    参数:
+    - ax: matplotlib的Axes对象,用于绘制图形。
+    - patch: matplotlib的Patch对象,用于添加到ax。
+    - auto_scale: 是否自动调整坐标轴范围,默认为True。(如果为False,xlim和ylim不会被影响)
+    '''
+    ax.add_patch(patch)
+    if auto_scale:
+        ax.autoscale_view()
+
+
+def add_path_patch(ax, vertices, codes=None, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+    '''
+    利用path创建patch。
+
+    参数:
+    - vertices: 顶点坐标。示例: [[0, 0], [1, 0], [1, 1], [0, 1]]
+    - codes: 顶点代码。示例: [Path.MOVETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY],默认为None,意为第一个是MOVETO,其余是LINETO。CLOSYPOLY表示闭合到MOVETO的点;比较高级的用法还有CURVE3, CURVE4等,可以作出贝塞尔曲线
+    - facecolor: 填充颜色,默认为'none'
+    - edgecolor: 边框颜色,默认为BLACK
+    - auto_scale: 是否自动调整坐标轴范围,默认为True
+    '''
+    p = mpatches.PathPatch(mpl.path.Path(vertices, codes), facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    add_patch(ax, p, auto_scale=auto_scale)
+    return p
+
+
+def add_polygon_patch(ax, xy, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+    '''
+    创建多边形patch。
+
+    参数:
+    - xy: 顶点坐标。示例: [[0, 0], [1, 0], [1, 1], [0, 1]]
+    - facecolor: 填充颜色,默认为'none'
+    - edgecolor: 边框颜色,默认为BLACK
+    - auto_scale: 是否自动调整坐标轴范围,默认为True
+    '''
+    p = mpatches.Polygon(xy, facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    add_patch(ax, p, auto_scale=auto_scale)
+    return p
+
+
+def add_circle_patch(ax, center, radius, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+    '''
+    创建圆形patch。
+
+    参数:
+    - center: 圆心坐标。
+    - radius: 圆半径。
+    - facecolor: 填充颜色,默认为'none'
+    - edgecolor: 边框颜色,默认为BLACK
+    - auto_scale: 是否自动调整坐标轴范围,默认为True
+    '''
+    p = mpatches.Circle(center, radius, facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    add_patch(ax, p, auto_scale=auto_scale)
+    return p
+# endregion
+
+
+# region 初级作图函数(clip)
+def clip_ax_by_patch(ax, patch):
+    '''
+    利用patch对ax进行裁剪。
+
+    参数:
+    - ax: matplotlib的Axes对象,用于绘制图形。
+    - patch: matplotlib的Patch对象,用于裁剪ax。(可以使用Rectangle, Circle等)
+    '''
+    for artist in ax.get_children():
+        artist.set_clip_path(patch)
+
+
+def clip_ax_by_polygon(ax, xy, patch_kwargs=None):
+    '''
+    利用xy构成的polygon对ax进行裁剪。
+    '''
+    patch_kwargs = update_dict(dict(alpha=0., edgecolor='none'), patch_kwargs)
+    patch = add_polygon_patch(ax, xy, **patch_kwargs)
+    clip_ax_by_patch(ax, patch)
+
+
+def clip_ax_by_circle(ax, center, radius, patch_kwargs=None):
+    '''
+    利用center和radius构成的circle对ax进行裁剪。
+    '''
+    patch_kwargs = update_dict(dict(alpha=0., edgecolor='none'), patch_kwargs)
+    patch = add_circle_patch(ax, center, radius, **patch_kwargs)
+    clip_ax_by_patch(ax, patch)
+
+
+def clip_ax_by_path(ax, vertices, codes=None, patch_kwargs=None):
+    '''
+    利用vertices和codes构成的path对ax进行裁剪。
+    '''
+    patch_kwargs = update_dict(dict(alpha=0., edgecolor='none'), patch_kwargs)
+    patch = add_path_patch(ax, vertices, codes, **patch_kwargs)
+    clip_ax_by_patch(ax, patch)
 # endregion
 
 
@@ -7449,7 +8478,26 @@ def add_ax_tag(ax, tag, x=AX_TAG_POS[0], y=AX_TAG_POS[1], fontsize=TAG_SIZE, va=
     :param kwargs: 传递给`ax.text`的额外关键字参数。
     '''
     # 画图
-    return ax.text(x, y, tag, fontsize=fontsize, va=va, ha=ha, **kwargs)
+    # return ax.text(x, y, tag, fontsize=fontsize, va=va, ha=ha, **kwargs)
+    return add_text(ax, tag, x=x, y=y, fontsize=fontsize, va=va, ha=ha, **kwargs)
+
+
+def add_axes_dict_tag(axes_dict, tag_dict, **kwargs):
+    '''
+    按照tag_dict的键值对，给axes_dict中的每个轴添加标签。
+    '''
+    for ax_name, tag in tag_dict.items():
+        add_ax_tag(axes_dict[ax_name], tag, **kwargs)
+
+
+def add_axes_list_tag_by_order(axes_list, tag_kwargs=None, **kwargs):
+    '''
+    按照顺序加a,b,c...标签。
+    '''
+    tag_kwargs = update_dict({}, tag_kwargs)
+    tag_list = get_tag(len(axes_list), **tag_kwargs)
+    for i, ax in enumerate(axes_list):
+        add_ax_tag(ax, tag_list[i], **kwargs)
 # endregion
 
 
@@ -7623,18 +8671,17 @@ def plt_colorful_line(ax, x, y, c, cmap=CMAP, norm_mode='linear', vmin=None, vma
         return line
 
 
-def plt_group_bar(ax, x, y, label_list=None, bar_width=None, colors=CMAP, vert=True, **kwargs):
+def plt_group_bar(ax, x, y, label_list, width=None, colors=CMAP, vert=True, **kwargs):
     '''
     绘制分组的柱状图。
     :param ax: matplotlib的轴对象,用于绘制图形
-    :param x: x轴的分组标签
-    :param y: 一个二维列表或数组,表示每组中柱子的高度
-    :param label_list: 每个柱子的标签,例如['a', 'b', 'c']
+    :param x: x轴的分组标签(比如['A', 'B'])
+    :param y: 一个二维列表或数组,表示每组中柱子的高度(shape=(len(x), len(label_list)),例如[[1, 2, 3], [4, 5, 6]])
+    :param label_list: 每个柱子的标签,例如['x', 'y', 'z']
     :param bar_width: 单个柱子的宽度,默认为None,自动确定宽度
     :param colors: 柱状图的颜色序列,应与label_list的长度相匹配;也可以指定cmap,默认为CMAP,然后根据label_list的长度生成颜色序列
     :param kwargs: 其他plt.bar支持的参数
     '''
-
     # 假如colors不是一个list,则用colors对应的cmap生成颜色
     if not isinstance(colors, list):
         colors = colors(np.linspace(0, 1, len(label_list)))
@@ -7642,16 +8689,16 @@ def plt_group_bar(ax, x, y, label_list=None, bar_width=None, colors=CMAP, vert=T
     num_groups = len(y)  # 组的数量
     num_bars = len(y[0])  # 每组中柱子的数量，假设每组柱子数量相同
 
-    if bar_width is None:
-        bar_width = BAR_WIDTH / num_bars
+    if width is None:
+        width = BAR_WIDTH / num_bars
 
     # 为每个柱子计算中心位置
     indices = np.arange(num_groups)
     for i, lbl in enumerate(label_list):
         offsets = (np.arange(num_bars) -
-                   np.arange(num_bars).mean()) * bar_width
+                   np.arange(num_bars).mean()) * width
         plt_bar(ax, indices + offsets[i], [y[j][i] for j in range(
-            num_groups)], label=lbl, color=colors[i], width=bar_width, vert=vert, **kwargs)
+            num_groups)], label=lbl, color=colors[i], width=width, vert=vert, **kwargs)
 
     if vert:
         ax.set_xticks(indices)
@@ -7661,42 +8708,38 @@ def plt_group_bar(ax, x, y, label_list=None, bar_width=None, colors=CMAP, vert=T
         ax.set_yticklabels(x)
 
 
-def plt_two_side_bar(ax, x, y1, y2, label1=None, label2=None, bar_width=BAR_WIDTH, color1=BLUE, color2=RED, yerr1=None, yerr2=None, capsize=PLT_CAP_SIZE, ecolor1=None, ecolor2=None, elabel1=None, elabel2=None, vert=True, equal_space=False, **kwargs):
+def plt_two_side_bar(ax, x, y1, y2, label1=None, label2=None, width=BAR_WIDTH, color1=BLUE, color2=RED, yerr1=None, yerr2=None, capsize=PLT_CAP_SIZE, ecolor1=BLACK, ecolor2=BLACK, elabel1=None, elabel2=None, vert=True, equal_space=False, **kwargs):
     '''
     使用x和y1,y2绘制两组柱状图
     '''
     plt_bar(ax, x, np.array(y1), label=label1, color=color1, vert=vert, equal_space=equal_space,
-                 err=yerr1, capsize=capsize, ecolor=ecolor1, elabel=elabel1, width=bar_width, **kwargs)
+                 err=yerr1, capsize=capsize, ecolor=ecolor1, elabel=elabel1, width=width, **kwargs)
     plt_bar(ax, x, -np.array(y2), label=label2, color=color2, vert=vert, equal_space=equal_space,
-                 err=yerr2, capsize=capsize, ecolor=ecolor2, elabel=elabel2, width=bar_width, **kwargs)
+                 err=yerr2, capsize=capsize, ecolor=ecolor2, elabel=elabel2, width=width, **kwargs)
 
+    local_max = np.nanmax([np.nanmax(y1), np.nanmax(y2)])
     if vert:
-        # 将y轴设置为对称
-        ax.set_ylim(-max(max(y1), max(y2)) * 1.2, max(max(y1), max(y2)) * 1.2)
-
-        # 修改y轴标签
-        ax.set_yticks(ax.get_yticks())
-        ax.set_yticklabels([str(abs(int(y))) for y in ax.get_yticks()])
+        axis = 'y'
     else:
-        # 将x轴设置为对称
-        ax.set_xlim(-max(max(y1), max(y2)) * 1.2, max(max(y1), max(y2)) * 1.2)
-
-        # 修改x轴标签
-        ax.set_xticks(ax.get_xticks())
-        ax.set_xticklabels([str(abs(int(x))) for x in ax.get_xticks()])
+        axis = 'x'
+    set_sym_positive_axis(ax, axis, local_max)
 
 
 def plt_group_box():
     pass
 
 
-def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, line_bound='ax', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True):
+def plt_linregress(ax, x, y, xlog=False, ylog=False, xlog_base=10, ylog_base=10, xlog_base_str=None, ylog_base_str=None, linear_but_log=False, label=None, scatter_color=BLUE, line_color=RED, line_bound='data', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True):
     '''
     使用线性回归结果绘制散点图和回归线,可以输入scatter的其他参数
 
     参数:
     ax - 绘图的Axes对象
     x, y - 数据
+    xlog, ylog - 是否对 x 和 y 取对数
+    xlog_base, ylog_base - 对数的底数
+    xlog_base_str, ylog_base_str - 对数的底数的字符串形式(如果不输入则会自动从xlog_base和ylog_base中获取)
+    linear_but_log - 如果为True,当x/ylog时直接将原数据log,并在线性尺度上绘制回归线,同时手动调整tick等变为x/ylog_base**k;如果为False,则在对数尺度上绘制回归线,此时ax本身是logscale的;两种方法的区别在于,对于10^0.1,10^0.2,直接使用logscale,将会显示不出来什么tick(因为logscale的tick都是整数),而手动调整tick则可以显示出来
     label - 数据标签
     x_label, y_label - 坐标轴标签
     title - 图标题
@@ -7728,27 +8771,81 @@ def plt_linregress(ax, x, y, label=None, scatter_color=BLUE, line_color=RED, lin
     x = np.array(x)
     y = np.array(y)
 
+    # 预处理数据(如果需要对数)
+    if xlog:
+        x_local = np.log(x) / np.log(xlog_base)
+    else:
+        x_local = x.copy()
+    if ylog:
+        y_local = np.log(y) / np.log(ylog_base)
+    else:
+        y_local = y.copy()
+
     # 绘制散点图
     if show_scatter:
-        plt_scatter(ax, x, y, color=scatter_color,
-                        label=label, **scatter_kwargs)
+        if linear_but_log:
+            plt_scatter(ax, x_local, y_local, color=scatter_color, label=label, **scatter_kwargs)
+        else:
+            plt_scatter(ax, x, y, color=scatter_color, label=label, **scatter_kwargs)
+
+    # 设置坐标轴和tick
+    if xlog:
+        if linear_but_log:
+            if xlog_base_str is None: # 自动获取对数底数的字符串形式
+                if np.allclose(xlog_base, np.e):
+                    xlog_base_str = 'e'
+                else:
+                    xlog_base_str = str(xlog_base)
+            set_linear_but_log_axis(ax, 'x', xlog_base_str)
+        else:
+            ax.set_xscale('log', base=xlog_base)
+            if np.allclose(xlog_base, np.e):
+                set_log_e_axis(ax, 'x')
+    if ylog:
+        if linear_but_log:
+            if ylog_base_str is None: # 自动获取对数底数的字符串形式
+                if np.allclose(ylog_base, np.e):
+                    ylog_base_str = 'e'
+                else:
+                    ylog_base_str = str(ylog_base)
+            set_linear_but_log_axis(ax, 'y', ylog_base_str)
+        else:
+            ax.set_yscale('log', base=ylog_base)
+            if np.allclose(ylog_base, np.e):
+                set_log_e_axis(ax, 'y')
 
     if x.size > 1 and y.size > 1:
         # 计算线性回归
-        regress_dict = get_linregress(x, y, **regress_kwargs)
+        regress_dict = get_linregress(x_local, y_local, **regress_kwargs)
 
         # 绘制回归线
         if line_bound == 'ax':
-            add_sline(ax, regress_dict['slope'], regress_dict['intercept'], color=line_color, **line_kwargs)
+            if xlog or ylog:
+                raise ValueError('xlog and ylog cannot be True when line_bound is "ax"')
+            add_sline(ax, regress_dict['slope'], regress_dict['intercept'], reference_point='auto', color=line_color, **line_kwargs)
         elif line_bound == 'data':
-            plt_line(ax, [np.nanmin(x), np.nanmax(x)], [np.nanmin(x) * regress_dict['slope'] + regress_dict['intercept'], np.nanmax(x) * regress_dict['slope'] + regress_dict['intercept']], color=line_color, **line_kwargs)
+            x_local_min, x_local_max = np.nanmin(x_local), np.nanmax(x_local)
+            # y_min不一定真的是min,这里只是为了对应x_min
+            y_local_min = x_local_min * regress_dict['slope'] + regress_dict['intercept']
+            y_local_max = x_local_max * regress_dict['slope'] + regress_dict['intercept']
+            
+            # 如果使用了对数坐标，将线还原到实际的 x 和 y 值
+            if xlog and not linear_but_log:
+                x_min, x_max = xlog_base ** x_local_min, xlog_base ** x_local_max
+            else:
+                x_min, x_max = x_local_min, x_local_max
+            if ylog and not linear_but_log:
+                y_min, y_max = ylog_base ** y_local_min, ylog_base ** y_local_max
+            else:
+                y_min, y_max = y_local_min, y_local_max
+            plt_line(ax, [x_min, x_max], [y_min, y_max], color=line_color, **line_kwargs)
 
         add_linregress_text(ax, regress_dict, show_list=show_list,
                             round_digit_list=round_digit_list, round_format_list=round_format_list, fontsize=text_size, **text_kwargs)
         return regress_dict
 
-
-def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, line_bound='ax', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
+@to_be_improved # 写的太麻烦了
+def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_type='kde', bw_method='auto', bins_x=BIN_NUM, bins_y=BIN_NUM, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label='density', cbar_position=None, linregress=True, line_color=RED, line_bound='data', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, cbar_kwargs=None, regress_kwargs=None):
     '''
     绘制密度散点图。
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -7811,41 +8908,50 @@ def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_typ
         z = hist[ix, iy]
 
     if linregress:
-        # 这里设置show_scatter为False,因为只需要线性拟合的线,散点由plt_colorful_scatter绘制
-        return plt_linregress(ax, x_array, y_array, label=None, line_color=line_color, line_bound=line_bound, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs, show_scatter=False), plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
+        # 这里设置plt_linregress的show_scatter为False,因为只需要线性拟合的线,散点由plt_colorful_scatter绘制
+        return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs), plt_linregress(ax, x_array, y_array, label=None, line_color=line_color, line_bound=line_bound, show_list=show_list, round_digit_list=round_digit_list, round_format_list=round_format_list, text_size=text_size, scatter_kwargs=scatter_kwargs, line_kwargs=line_kwargs, text_kwargs=text_kwargs, regress_kwargs=regress_kwargs, show_scatter=False)
     else:
         return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
 
 
-def plt_marginal_density_scatter(ax, x, y, density_scatter_kwargs=None, marginal_kwargs=None):
+def plt_marginal_density_scatter(ax, x, y, x_side_ax=None, y_side_ax=None, density_scatter_kwargs=None, marginal_kwargs=None):
     '''
     绘制密度散点图和边缘分布。
     :param ax: matplotlib的轴对象,用于绘制图形
     :param x: x轴的数据
     :param y: y轴的数据
+    :param x_side_ax: x轴的边缘分布轴,默认为None
+    :param y_side_ax: y轴的边缘分布轴,默认为None
     :param density_scatter_kwargs: 传递给plt_density_scatter的额外关键字参数
     :param marginal_kwargs: 传递给add_double_marginal_distribution的额外关键字参数
     '''
     density_scatter_kwargs = update_dict(get_default_param(plt_density_scatter), density_scatter_kwargs)
     density_scatter_kwargs['cbar_position'] = update_dict(CBAR_POSITION, density_scatter_kwargs['cbar_position'])
 
-    marginal_kwargs = update_dict(get_default_param(add_double_marginal_distribution), marginal_kwargs)
+    if x_side_ax is None and y_side_ax is None:
+        marginal_kwargs = update_dict(get_default_param(add_double_marginal_distribution), marginal_kwargs)
+        x_side_ax, y_side_ax = add_double_marginal_distribution(ax, x, y, **marginal_kwargs)
 
     # 此处先不添加cbar
-    hist = plt_density_scatter(ax, x, y, **update_dict(density_scatter_kwargs, {'cbar': False}))
-
-    x_side_ax, y_side_ax = add_double_marginal_distribution(ax, x, y, **marginal_kwargs)
+    sc = plt_density_scatter(ax, x, y, **update_dict(density_scatter_kwargs, {'cbar': False}))
+    # 由于density scatter有概率输出多个结果,所以需要判断,而需要的sc一直是第一个
+    if isinstance(sc, tuple):
+        sc = sc[0]
 
     if density_scatter_kwargs['cbar']:
         if density_scatter_kwargs['cbar_position']['position'] == marginal_kwargs['x_side_ax_position']:
             density_scatter_kwargs['cbar_position']['pad'] += marginal_kwargs['x_side_ax_size'] + marginal_kwargs['x_side_ax_pad']
+            if not marginal_kwargs['outside']:
+                density_scatter_kwargs['cbar_position']['pad'] /= (1 - marginal_kwargs['x_side_ax_size'])
         if density_scatter_kwargs['cbar_position']['position'] == marginal_kwargs['y_side_ax_position']:
             density_scatter_kwargs['cbar_position']['pad'] += marginal_kwargs['y_side_ax_size'] + marginal_kwargs['y_side_ax_pad']
+            if not marginal_kwargs['outside']:
+                density_scatter_kwargs['cbar_position']['pad'] /= (1 - marginal_kwargs['y_side_ax_size'])
 
-        cbars = add_side_colorbar(ax, mappable=hist, cmap=density_scatter_kwargs['cmap'], cbar_label=density_scatter_kwargs['cbar_label'], cbar_position=density_scatter_kwargs['cbar_position'], **update_dict({}, density_scatter_kwargs['cbar_kwargs']))
-        return hist, x_side_ax, y_side_ax, cbars
+        cbars = add_side_colorbar(ax, mappable=sc, cmap=density_scatter_kwargs['cmap'], cbar_label=density_scatter_kwargs['cbar_label'], cbar_position=density_scatter_kwargs['cbar_position'], **update_dict({}, density_scatter_kwargs['cbar_kwargs']))
+        return sc, x_side_ax, y_side_ax, cbars
     else:
-        return hist, x_side_ax, y_side_ax
+        return sc, x_side_ax, y_side_ax
 
 
 def plt_errorbar_line(ax, x, y, err, line_label=None, elabel=None, line_color=BLUE, ecolor=BLACK, capsize=PLT_CAP_SIZE, vert=True, line_kwargs=None, error_kwargs=None):
@@ -8061,12 +9167,14 @@ def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, 
     add_text(ax, text, x=text_x, y=text_y, **text_kwargs)
 
 
-def plt_marginal_hist_2d(ax, x, y, stat='probability', cbar_label=None, hist_kwargs=None, marginal_kwargs=None):
+def plt_marginal_hist_2d(ax, x, y, x_side_ax=None, y_side_ax=None, stat='probability', cbar_label=None, hist_kwargs=None, marginal_kwargs=None):
     '''
     带有边缘分布的二维直方图
     :param ax: matplotlib的轴对象,用于绘制图形
     :param x: x轴的数据
     :param y: y轴的数据
+    :param x_side_ax: x轴的边缘分布轴,默认为None
+    :param y_side_ax: y轴的边缘分布轴,默认为None
     :param stat: 统计量,默认为'probability'
     :param cbar_label: 颜色条的标签,默认和stat相同
     :param hist_kwargs: 传递给plt_hist_2d的额外关键字参数
@@ -8077,18 +9185,23 @@ def plt_marginal_hist_2d(ax, x, y, stat='probability', cbar_label=None, hist_kwa
     hist_kwargs = update_dict(get_default_param(plt_hist_2d), hist_kwargs)
     hist_kwargs['cbar_position'] = update_dict(CBAR_POSITION, hist_kwargs['cbar_position'])
 
-    marginal_kwargs = update_dict(get_default_param(add_double_marginal_distribution), marginal_kwargs)
+    if x_side_ax is None and y_side_ax is None:
+        marginal_kwargs = update_dict(get_default_param(add_double_marginal_distribution), marginal_kwargs)
+        x_side_ax, y_side_ax = add_double_marginal_distribution(ax, x, y, **marginal_kwargs)
 
     # 此处先不添加cbar
     hist = plt_hist_2d(ax, x, y, **update_dict(hist_kwargs, {'cbar': False, 'stat': stat}))
 
-    x_side_ax, y_side_ax = add_double_marginal_distribution(ax, x, y, **marginal_kwargs)
 
     if hist_kwargs['cbar']:
         if hist_kwargs['cbar_position']['position'] == marginal_kwargs['x_side_ax_position']:
             hist_kwargs['cbar_position']['pad'] += marginal_kwargs['x_side_ax_size'] + marginal_kwargs['x_side_ax_pad']
+            if not marginal_kwargs['outside']:
+                hist_kwargs['cbar_position']['pad'] /= (1 - marginal_kwargs['x_side_ax_size'])
         if hist_kwargs['cbar_position']['position'] == marginal_kwargs['y_side_ax_position']:
             hist_kwargs['cbar_position']['pad'] += marginal_kwargs['y_side_ax_size'] + marginal_kwargs['y_side_ax_pad']
+            if not marginal_kwargs['outside']:
+                hist_kwargs['cbar_position']['pad'] /= (1 - marginal_kwargs['y_side_ax_size'])
 
         cbars = add_side_colorbar(ax, mappable=hist, cmap=hist_kwargs['cmap'], cbar_label=cbar_label, cbar_position=hist_kwargs['cbar_position'], **update_dict({}, hist_kwargs['cbar_kwargs']))
         return hist, x_side_ax, y_side_ax, cbars
@@ -8576,7 +9689,7 @@ def sns_band_line(ax, x, y, band_width, label=None, color=BLUE, alpha=FAINT_ALPH
 
 
 # region 复杂作图函数(sns系列,输入dataframe使用)
-def sns_marginal_heatmap(ax, data, outside=True, x_side_ax_position='top', y_side_ax_position='right', x_side_ax_pad=SIDE_PAD, y_side_ax_pad=SIDE_PAD, x_side_ax_size=0.3, y_side_ax_size=0.3, x_color=BLUE, y_color=BLUE, heatmap_kwargs=None, bar_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
+def sns_marginal_heatmap(ax, data, x_side_ax=None, y_side_ax=None, outside=True, x_side_ax_position='top', y_side_ax_position='right', x_side_ax_pad=SIDE_PAD, y_side_ax_pad=SIDE_PAD, x_side_ax_size=0.3, y_side_ax_size=0.3, x_color=BLUE, y_color=BLUE, heatmap_kwargs=None, bar_kwargs=None, rm_tick=True, rm_spine=True, rm_axis=True):
     '''
     绘制带有边缘分布的热图
     '''
@@ -8601,12 +9714,13 @@ def sns_marginal_heatmap(ax, data, outside=True, x_side_ax_position='top', y_sid
     sns_heatmap(ax, local_data, **heatmap_kwargs)
 
     # 获得边缘分布需要的ax
-    if outside:
-        x_side_ax = add_side_ax(ax, position=x_side_ax_position, relative_size=x_side_ax_size, pad=x_side_ax_pad, sharex=ax)
-        y_side_ax = add_side_ax(ax, position=y_side_ax_position, relative_size=y_side_ax_size, pad=y_side_ax_pad, sharey=ax)
-    else:
-        # 当边缘分布在内部时，需要手动分划ax然后获取需要的
-        x_side_ax, y_side_ax = split_quadrant_relocate_ax(ax, x_side_ax_position=x_side_ax_position, y_side_ax_position=y_side_ax_position, x_side_ax_size=x_side_ax_size, y_side_ax_size=y_side_ax_size, x_side_ax_pad=x_side_ax_pad, y_side_ax_pad=y_side_ax_pad)
+    if x_side_ax is None and y_side_ax is None:
+        if outside:
+            x_side_ax = add_side_ax(ax, position=x_side_ax_position, relative_size=x_side_ax_size, pad=x_side_ax_pad, sharex=ax)
+            y_side_ax = add_side_ax(ax, position=y_side_ax_position, relative_size=y_side_ax_size, pad=y_side_ax_pad, sharey=ax)
+        else:
+            # 当边缘分布在内部时，需要手动分划ax然后获取需要的
+            ax, x_side_ax, y_side_ax = split_quadrant_ax(ax, x_side_ax_position=x_side_ax_position, y_side_ax_position=y_side_ax_position, x_side_ax_size=x_side_ax_size, y_side_ax_size=y_side_ax_size, x_side_ax_pad=x_side_ax_pad, y_side_ax_pad=y_side_ax_pad, sharex=True, sharey=True)
 
     # 绘制边缘分布
     plt_bar(x_side_ax, x=np.arange(len(local_data.columns)) + 0.5, y=col_sum_df(local_data), **update_dict(bar_kwargs, {'color': x_color}))
@@ -8916,6 +10030,119 @@ def add_linregress_text(ax, regress_dict, show_list=None, round_digit_list=None,
 # endregion
 
 
+# region 将ax(可能是np.ndarray,list,dict或者单个ax)调整可以迭代的类型;或者将调整后的ax转换为原有的形状和类型;squeeze和unsqueeze
+def get_iterable_ax(ax):
+    '''
+        不会改变原有输入的ax,返回一个可以迭代的ax
+    '''
+    if isinstance(ax, np.ndarray):
+        return ax.flatten()
+    elif isinstance(ax, list):
+        return flatten_list(pure_list(ax))
+    elif isinstance(ax, dict):
+        return list(ax.values())
+    else:
+        return [ax]
+
+
+def rebuild_ax(flatten_ax, original_ax):
+    '''
+    根据 original_ax 的结构，还原扁平化的 flatten_ax。
+    '''
+    if isinstance(original_ax, np.ndarray):
+        # 将扁平化的 ax 重塑为原有 ndarray 的形状
+        return np.reshape(flatten_ax, original_ax.shape)
+    elif isinstance(original_ax, list):
+        # 根据 list 的结构，递归还原
+        return rebuild_list(flatten_ax, original_ax)
+    elif isinstance(original_ax, dict):
+        # 将 flatten_ax 的值与 dict 的 keys 重新组合
+        return dict(zip(original_ax.keys(), flatten_ax))
+    else:
+        # 返回原有的 ax
+        return flatten_ax
+
+
+def squeeze_ax(ax):
+    '''
+    将array的ax压缩
+
+    当然,也可以用于subfig的压缩
+    '''
+    if isinstance(ax, np.ndarray):
+        if ax.size == 1:
+            if ax.ndim == 2:
+                return ax[0, 0]
+            elif ax.ndim == 1:
+                return ax[0]
+        else:
+            return np.squeeze(ax)
+    else:
+        return ax
+
+
+def unsqueeze_ax(ax, ncols=1, nrows=1):
+    '''
+    将ax变成二维的array
+
+    当然,也可以用于subfig的还原
+    '''
+    if isinstance(ax, np.ndarray):
+        return np.reshape(ax, (nrows, ncols))
+    else:
+        return np.array([[ax]])
+# endregion
+
+
+# region 通用函数(颜色)
+def rgb_to_rgba(rgb, alpha=1.0):
+    """
+    将 RGB 颜色转换为 RGBA 颜色
+
+    参数:
+    rgb (tuple): RGB 颜色值，范围在 0-1
+    alpha (float): 透明度，范围在 0-1
+
+    返回:
+    tuple: RGBA 颜色值
+    """
+    r, g, b = rgb
+
+    # 返回 RGBA 颜色值
+    return (r, g, b, alpha)
+# endregion
+
+
+# region 通用函数(transform)
+def map_transform(x, y, source_transform, target_transform):
+    """
+    将坐标从一个 transform 转换到另一个 transform。
+
+    参数：
+    - ax: matplotlib 的 Axes 对象。
+    - x, y: 要转换的坐标。
+    - source_transform: 源坐标系统的 transform。
+    - target_transform: 目标坐标系统的 transform。
+
+    返回：
+    - 转换后的坐标 (x_new, y_new)。
+
+    注意:
+    不要转换data坐标,因为data坐标随着图像继续作画,或者改变坐标轴的范围,会发生变化
+    """
+    # 将 (x, y) 点转换到 source_transform 的坐标系统中
+    source_to_display = source_transform.transform([x, y])
+    
+    # 获取 target_transform 的逆变换（从 display 转到 target）
+    display_to_target = target_transform.inverted()
+    
+    # 使用逆变换将 display 坐标转换到 target 坐标系统
+    x_new, y_new = display_to_target.transform(source_to_display)
+    
+    return x_new, y_new
+# endregion
+
+
 # region 通用函数(判断是否是xlabel, ylabel, title, ax的外框)
 @to_be_improved
 def is_xlabel(obj):
@@ -9146,7 +10373,7 @@ def rm_ax_spine(ax, spines_to_remove=None):
 
     参数:
     - ax: matplotlib的Axes对象
-    - spines_to_remove: 要移除的边框列表
+    - spines_to_remove: 要移除的边框(边框指的仅仅是轴的线,不包括tick,ticklabel和label,如果想要移除这些,请使用rm_ax_tick,rm_ax_ticklabel,rm_ax_specific_axis)
     '''
     if spines_to_remove is None:
         spines_to_remove = ['top', 'right', 'left', 'bottom']
@@ -9165,6 +10392,21 @@ def rm_cbar_spine(cbar):
     - cbar: matplotlib的Colorbar对象
     '''
     cbar.outline.set_visible(False)
+
+
+def set_ax_spine(axs, spine_params=None):
+    '''
+    应用边框参数到轴。
+
+    参数:
+    - axs: matplotlib的Axes对象或者可迭代对象
+    - spine_params: 边框参数, 例如{'linewidth': 2, 'color': 'red', 'linestyle': '--'}
+    '''
+    axs = get_iterable_ax(axs)
+    if spine_params:
+        for ax in axs:
+            for spine in ax.spines.values():
+                spine.set(**spine_params)
 # endregion
 
 
@@ -9238,7 +10480,7 @@ def rm_ax_tick(ax, axis=None):
             ax.yaxis.set_tick_params(width=0)
 
 
-def rm_ax_ticklabel(ax, axis):
+def rm_ax_ticklabel(ax, axis=None):
     '''
     移除轴的刻度。
 
@@ -9247,25 +10489,24 @@ def rm_ax_ticklabel(ax, axis):
     - axis: 要移除的轴
 
     注意:
-    - 此函数会对所有sharex和sharey的轴生效
+    - ax.set_xticklabels([])和ax.set_yticklabels([])会对所有sharex和sharey的轴生效, 所以不推荐使用
     '''
     if axis is None or axis == 'both':
         axis = ['x', 'y']
 
     for tick in axis:
         if tick == 'x':
-            ax.set_xticklabels([])
+            ax.tick_params(axis='x', which='both', labelbottom=False)
         elif tick == 'y':
-            ax.set_yticklabels([])
+            ax.tick_params(axis='y', which='both', labelleft=False)
+
+
+def set_cbar_tick(cbar, norm_mode='linear', ticks=None):
+    pass
 # endregion
 
 
-# region 通用函数(locator)
-
-# endregion
-
-
-# region 通用函数(axis)
+# region 通用函数(broken axis, share axis, move axis, rm_ax_axis, set_ax_aspect)
 def broken_axis(ax1, ax2, orientation, link_location='auto', link_kwargs=None):
     '''
     连接两个ax, 并绘制出中断的轴的效果, 可搭配split_ax使用, 注意设置好xlim和ylim等
@@ -9345,20 +10586,94 @@ def broken_axis(ax1, ax2, orientation, link_location='auto', link_kwargs=None):
             ax1.plot([1], [0], transform=ax1.transAxes, **link_kwargs)
 
 
-def share_axis(*axes, sharex=True, sharey=True):
+def broken_axis_multi():
+    pass
+
+
+def share_axis(axs, sharex=True, sharey=True):
+    # '''
+    # 通过在原先位置强行创建新的ax来共享轴。
+
+    # 当输入多个axs后,会将所有的axs都删除,然后在原先的位置创建新的ax,并共享轴。
+    # 如果需要share_axis的ax已经作画,则这样的操作会导致之前的作画丢失。
+    # 如果需要对某个已经作画的target_ax进行share_axis,请使用share_axis_to_target
+    # 这个函数一定要接收输出,否则外部仍然是原来的axs
+    # '''
+    # iterable_axs = get_iterable_ax(axs)
+    # fig = iterable_axs[0].get_figure()
+    # new_axs = []
+    # for i, ax in enumerate(iterable_axs):
+    #     pos = ax.get_position()
+    #     if i==0:
+    #         new_axs.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height))
+    #     else:
+    #         new_axs.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height, sharex=new_axs[0] if sharex else None, sharey=new_axs[0] if sharey else None))
+    #     rm_ax(ax)
+    # return rebuild_ax(new_axs, axs)
     '''
-    通过在原先位置强行创建新的ax来共享轴。
+    share_axis新版,不一定需要接收输出,可以直接在原地修改
+
+    注意:
+    如果ax1.sharex(ax2)和ax1.sharex(ax3),如果直接这么写则会报错,但是ax2.sharex(ax1)和ax3.sharex(ax1)是可以的
     '''
-    fig = axes[0].get_figure()
-    new_axes = []
-    for i, ax in enumerate(axes):
-        pos = ax.get_position()
-        if i==0:
-            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height))
+    if not isinstance(sharex, str):
+        sharex = "all" if sharex else "none"
+    if not isinstance(sharey, str):
+        sharey = "all" if sharey else "none"
+
+    # 2d numpy array的情形,可以按行或者按列共享
+    if isinstance(axs, np.ndarray):
+        if axs.ndim == 2:
+            nrows, ncols = axs.shape
+            for i in range(nrows):
+                for j in range(ncols):
+                    shared_with = {"none": None, "all": axs[0, 0],
+                                    "row": axs[i, 0], "col": axs[0, j]}
+                    axs[i, j].sharex(shared_with[sharex])
+                    axs[i, j].sharey(shared_with[sharey])
+            return axs
+
+    # 非2d numpy array的情形,只能按照all或者none共享
+    if sharex in ['row', 'col'] or sharey in ['row', 'col']:
+        print("Warning: sharex and sharey can only be 'all' or 'none' when axs is not a 2D numpy array.")
+    iterable_axs = get_iterable_ax(axs)
+    for i, ax in enumerate(iterable_axs):
+        if i == 0:
+            pass
         else:
-            new_axes.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height, sharex=axes[0] if sharex else None, sharey=axes[0] if sharey else None))
-        ax.set_visible(False)
-    return new_axes
+            if sharex:
+                ax.sharex(iterable_axs[0])
+            if sharey:
+                ax.sharey(iterable_axs[0])
+    return rebuild_ax(iterable_axs, axs)
+
+
+def share_axis_to_target(axs, target_ax, sharex=True, sharey=True):
+    # '''
+    # 通过在原先位置强行创建新的ax来共享轴。
+
+    # 当输入多个axs后,会将所有的axs都删除,然后在原先的位置创建新的ax,并与target_ax共享轴。
+    # 如果需要share_axis的ax已经作画,则这样的操作会导致之前的作画丢失。
+    # 这个函数一定要接收输出,否则外部仍然是原来的axs
+    # '''
+    # iterable_axs = get_iterable_ax(axs)
+    # fig = iterable_axs[0].get_figure()
+    # new_axs = []
+    # for ax in iterable_axs:
+    #     pos = ax.get_position()
+    #     new_axs.append(add_ax(fig, pos.x0, pos.x0 + pos.width, pos.y0, pos.y0 + pos.height, sharex=target_ax if sharex else None, sharey=target_ax if sharey else None))
+    #     rm_ax(ax)
+    # return rebuild_ax(new_axs, axs)
+    '''
+    share_axis_to_target新版,不一定需要接收输出,可以直接在原地修改
+    '''
+    iterable_axs = get_iterable_ax(axs)
+    for ax in iterable_axs:
+        if sharex:
+            ax.sharex(target_ax)
+        if sharey:
+            ax.sharey(target_ax)
+    return rebuild_ax(iterable_axs, axs)
 
 
 def move_axis(ax, axis, position):
@@ -9383,12 +10698,35 @@ def move_axis(ax, axis, position):
 
 def rm_ax_axis(ax):
     '''
-    移除轴的坐标轴。
+    移除轴的坐标轴。(除了title,其他的都会被移除,比如外框,刻度,刻度标签等)
 
     参数:
     - ax: matplotlib的Axes对象
     '''
     ax.axis('off')
+
+
+def rm_ax_specific_axis(ax, axis=None):
+    '''
+    移除轴的特定坐标轴。
+
+    参数:
+    - ax: matplotlib的Axes对象
+    - axis: 要移除的轴, 可选 'x', 'y', 'both'
+    '''
+    if axis is None or axis == 'both':
+        axis = ['x', 'y']
+
+    for ax_type in axis:
+        if ax_type == 'x':
+            ax.spines['bottom'].set_visible(False)
+            ax.spines['top'].set_visible(False)
+        elif ax_type == 'y':
+            ax.spines['left'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+    
+    rm_ax_tick(ax, axis)
+    rm_ax_ticklabel(ax, axis)
 
 
 def set_ax_aspect(ax, aspect=1, adjustable='datalim', **kwargs):
@@ -9435,7 +10773,7 @@ def set_ax_aspect_3d(ax, aspect=(1, 1, 1), adjustable='datalim', **kwargs):
 # endregion
 
 
-# region 通用函数(坐标轴刻度)
+# region 通用函数(坐标轴scale)
 def set_symlog_scale(ax, axis, linthresh, linscale=1, **kwargs):
     '''
     设置对数坐标轴的对称对数刻度。
@@ -9453,10 +10791,6 @@ def set_symlog_scale(ax, axis, linthresh, linscale=1, **kwargs):
         ax.set_yscale('symlog', linthresh=linthresh, linscale=linscale, **kwargs)
     elif axis == 'z':
         ax.set_zscale('symlog', linthresh=linthresh, linscale=linscale, **kwargs)
-
-
-def set_cbar_tick(cbar, norm_mode='linear', ticks=None):
-    pass
 # endregion
 
 
@@ -9474,12 +10808,14 @@ def align_label(axs, axis, fig=None):
     - 假如某个ax的轴在左侧，而其他的在右侧，那么无法对齐。
     - 如果出现无法对齐的情况,可以尝试align_label_manual。
     '''
+    if isinstance(axs, np.ndarray):
+        local_axs = axs.flatten()
     if fig is None:
-        fig = axs[0].get_figure()
+        fig = local_axs[0].get_figure()
     if axis == 'x':
-        fig.align_xlabels(axs)
+        fig.align_xlabels(local_axs)
     elif axis == 'y':
-        fig.align_ylabels(axs)
+        fig.align_ylabels(local_axs)
 
 
 def align_label_manual(axs, axis, label_coord):
@@ -9615,8 +10951,35 @@ def adjust_ax_tick(ax, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTAT
 # endregion
 
 
+# region 通用函数(legend)
+def rm_ax_legend(ax):
+    legend = ax.get_legend()
+    if legend is not None:
+        legend.remove()
+
+
+def set_ax_legend(ax, legend_loc=LEGEND_LOC, legend_size=LEGEND_SIZE, bbox_to_anchor=None, text_process=None, rm_exist_legend=True, ncols=1, facecolor='inherit', edgecolor='0.8', labelcolor=None, **kwargs):
+    '''
+    facecolor: 图例框的颜色,默认为'inherit';如果想要不设置,可以设置为'none'或者'None'(注意这个是字符串)
+    edgecolor: 图例框的边框颜色,默认为'0.8';如果想要不设置,可以设置为'none'或者'None'(注意这个是字符串)
+    labelcolor: label中文字的颜色,如果需要和line,scatter一致,可以设置为'linecolor'
+    '''
+    if rm_exist_legend:
+        # 去掉已有的图例
+        rm_ax_legend(ax)
+    # 检查是否有图例标签
+    handles, labels = ax.get_legend_handles_labels()
+    # 去掉重复
+    handles, labels = dict(zip(labels, handles)).values(), dict(zip(labels, handles)).keys()
+    if labels:
+        labels = [format_text(label, text_process) for label in labels]
+        ax.legend(handles, labels, loc=legend_loc,
+                fontsize=legend_size, bbox_to_anchor=bbox_to_anchor, ncol=ncols, facecolor=facecolor, edgecolor=edgecolor, labelcolor=labelcolor, **kwargs)
+# endregion
+
+
 # region 通用函数(一键调整ax)
-def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_size=None, ytick_size=None, ztick_size=None, xtick_rotation=0, ytick_rotation=0, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xsci=None, ysci=None, zsci=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, tight_layout=False):
+def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_label=None, ytick_label=None, ztick_label=None, xtick_size=None, ytick_size=None, ztick_size=None, xtick_rotation=0, ytick_rotation=0, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend=True, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, rm_exist_legend=True, legend_kwargs=None, tight_layout=False, reset_scale=False):
     '''
     设置图表的轴、标题、范围和图例
 
@@ -9633,13 +10996,13 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
     xtick_size, ytick_size - x轴和y轴刻度标签字体大小
     legend_size - 图例字体大小
     xlim, ylim - 坐标轴范围
-    xsci, ysci - 是否启用科学记数法
     legend_loc - 图例位置
     bbox_to_anchor - 图例的位置参数(示例:(1, 1), 配合legend_loc='upper left'表示图例框的upper left角放在坐标(1, 1)处)
     tight_layout - 是否启用紧凑布局,默认为False,如果输入dict,则作为tight_layout的参数
+    reset_scale - 是否在不设定xlog等的时候重新set为linear(如果True则会进行一步linear,但是这有可能破坏一些xticklabel之类的设置)
     '''
     text_process = update_dict(TEXT_PROCESS, text_process)
-
+    legend_kwargs = update_dict({}, legend_kwargs)
     is_3d = isinstance(ax, Axes3D)
 
     # 尝试获取x_label和y_label
@@ -9661,11 +11024,11 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 
     # 设置tick
     if xtick is not None:
-        ax.set_xticks(xtick)
+        ax.set_xticks(xtick, labels=xtick_label)
     if ytick is not None:
-        ax.set_yticks(ytick)
+        ax.set_yticks(ytick, labels=ytick_label)
     if is_3d and ztick is not None:
-        ax.set_zticks(ztick)
+        ax.set_zticks(ztick, labels=ztick_label)
 
     # 设置字体
     if xtick_size is None:
@@ -9688,24 +11051,20 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
             ztick_size = tick_size
         ax.tick_params(axis='z', labelsize=ztick_size)
 
-    # 设置坐标轴格式
-    if xsci:
-        ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.ticklabel_format(style='sci', axis='x', scilimits=(0, 0))
-    if ysci:
-        ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.ticklabel_format(style='sci', axis='y', scilimits=(0, 0))
-    if is_3d and zsci:
-        ax.zaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.ticklabel_format(style='sci', axis='z', scilimits=(0, 0))
-
     # 设置对数坐标轴
     if xlog:
         ax.set_xscale('log')
+    elif reset_scale:
+        ax.set_xscale('linear')
     if ylog:
         ax.set_yscale('log')
-    if is_3d and zlog:
-        ax.set_zscale('log')
+    elif reset_scale:
+        ax.set_yscale('linear')
+    if is_3d:
+        if zlog:
+            ax.set_zscale('log')
+        elif reset_scale:
+            ax.set_zscale('linear')
 
     # 设置坐标轴范围
     if xlim is not None:
@@ -9715,14 +11074,8 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
     if is_3d and zlim is not None:
         ax.set_zlim(zlim)
 
-    # 检查是否有图例标签
-    handles, labels = ax.get_legend_handles_labels()
-    # 去掉重复
-    handles, labels = dict(zip(labels, handles)).values(), dict(zip(labels, handles)).keys()
-    if labels:
-        labels = [format_text(label, text_process) for label in labels]
-        ax.legend(handles, labels, loc=legend_loc,
-                  fontsize=legend_size, bbox_to_anchor=bbox_to_anchor)
+    if legend:
+        set_ax_legend(ax, legend_loc=legend_loc, legend_size=legend_size, bbox_to_anchor=bbox_to_anchor, text_process=text_process, rm_exist_legend=rm_exist_legend, **legend_kwargs)
 
     if tight_layout:
         plt.tight_layout(**tight_layout)
@@ -9732,83 +11085,374 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 # endregion
 
 
-# region 通用函数(获取合适的margin)
-def get_margin(xlabel_space=False, ylabel_space=False, cbar_space=False):
+# region 通用函数(ax的label管理)
+def set_ax_label(ax, label=None):
+    '''
+    添加轴的标签(方便后续直接从fig获取时,可以知道这个ax是干什么的)
+
+    如果label是None,则设置默认标签;否则,label需要和ax的数据类型相同,且形状相同
+    '''
+    if isinstance(ax, dict):
+        # 如果 ax 是字典
+        if label is None:
+            # 如果 label 为 None, 则设置默认标签
+            for k, v in ax.items():
+                v.set_label(k)
+        elif isinstance(label, dict):
+            # 如果 label 是字典
+            for k in ax.keys():
+                if k in label:  # 确保键在 label 中
+                    ax[k].set_label(label[k])
+
+    elif isinstance(ax, np.ndarray):
+        # 如果 ax 是二维数组
+        if ax.ndim == 2:
+            rows, cols = ax.shape
+            if label is None:
+                # 如果 label 为 None, 则设置默认标签
+                for i in range(rows):
+                    for j in range(cols):
+                        ax[i, j].set_label(f"row_{i}_col_{j}")
+            elif isinstance(label, np.ndarray) and label.shape == ax.shape:
+                # 如果 label 是二维数组且形状与 ax 相同
+                for i in range(rows):
+                    for j in range(cols):
+                        ax[i, j].set_label(label[i, j])
+
+        # 如果 ax 是一维数组
+        elif ax.ndim == 1:
+            length = ax.shape[0]
+            if label is None:
+                # 如果 label 为 None, 则设置默认标签
+                for i in range(length):
+                    ax[i].set_label(f"index_{i}")
+            elif isinstance(label, list) and len(label) == length:
+                # 如果 label 是列表且长度与 ax 相同
+                for i in range(length):
+                    ax[i].set_label(label[i])
+    
+    elif isinstance(ax, plt.Axes):
+        # 如果 ax 是单个 Axes 对象
+        ax.set_label(label)
+
+
+def find_ax_by_label(fig, label):
+    '''
+    利用label找到对应的ax
+    '''
+    for ax in fig.axes:
+        if ax.get_label() == label:
+            return ax
+    return None
+# endregion
+
+
+# region 通用函数(获取合适的margin和adjust_params)
+def get_margin_basic(margin=None, left_space=False, bottom_space=False, right_space=False, top_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1.):
     '''
     获取合适的margin
 
     参数:
-    - xlabel_space: 是否加大留给x轴标签的间距
-    - ylabel_space: 是否加大留给y轴标签的间距
-    - cbar_space: 是否加大留给colorbar的间距
+    - left_space: 是否加大留给侧边的间距
+    - bottom_space: 是否加大留给底部的间距
+    - right_space: 是否加大留给右侧的间距
+    - top_space: 是否加大留给顶部的间距
     '''
-    margin = MARGIN.copy()
-    if xlabel_space:
-        margin['bottom'] += 0.05
-    if ylabel_space:
-        margin['left'] += 0.05
-    if cbar_space:
-        margin['right'] -= 0.05
+    margin = update_dict(MARGIN, margin)
+    if left_space:
+        margin['left'] += 0.05 * left_ratio
+    if bottom_space:
+        margin['bottom'] += 0.05 * bottom_ratio
+    if right_space:
+        margin['right'] -= 0.05 * right_ratio
+    if top_space:
+        margin['top'] -= 0.05 * top_ratio
     return margin
 
 
-def get_margin_3d(bottom_space=False, left_space=False, cbar_space=False):
+def get_margin_custom(margin=None, left_space=False, bottom_space=False, right_space=False, top_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1.):
+    margin = update_dict(MARGIN, margin)
+    return get_margin_basic(margin, left_space, bottom_space, right_space, top_space, left_ratio, bottom_ratio, right_ratio, top_ratio)
+
+
+def get_margin_custom_3d(margin=None, left_space=False, bottom_space=False, right_space=False, top_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1.):
+    margin = update_dict(MARGIN_3D, margin)
+    return get_margin_basic(margin, left_space, bottom_space, right_space, top_space, left_ratio, bottom_ratio, right_ratio, top_ratio)
+
+
+def get_suitable_adjust_params_basic(adjust_params_custom, left_space=False, bottom_space=False, right_space=False, top_space=False, w_space=False, h_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1., w_ratio=1., h_ratio=1.):
     '''
-    获取合适的3D margin
+    获取合适的adjust_params_custom
 
     参数:
-    - bottom_space: 是否加大留给底部的间距
     - left_space: 是否加大留给侧边的间距
-    - cbar_space: 是否加大留给colorbar的间距
+    - bottom_space: 是否加大留给底部的间距
+    - right_space: 是否加大留给右侧的间距
+    - top_space: 是否加大留给顶部的间距
+    - w_space: 是否加大水平间距
+    - h_space: 是否加大垂直间距
     '''
-    margin = MARGIN_3D.copy()
-    if bottom_space:
-        margin['bottom'] += 0.05
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
     if left_space:
-        margin['left'] += 0.05
-    if cbar_space:
-        margin['right'] -= 0.15
+        adjust_params_custom['left'] += 0.05 * left_ratio
+    if bottom_space:
+        adjust_params_custom['bottom'] += 0.05 * bottom_ratio
+    if right_space:
+        adjust_params_custom['right'] -= 0.05 * right_ratio
+    if top_space:
+        adjust_params_custom['top'] -= 0.05 * top_ratio
+    if w_space:
+        adjust_params_custom['wspace'] += 0.1 * w_ratio
+    if h_space:
+        adjust_params_custom['hspace'] += 0.1 * h_ratio
+    return adjust_params_custom
+
+
+def get_suitable_adjust_params_custom(adjust_params_custom=None, left_space=False, bottom_space=False, right_space=False, top_space=False, w_space=False, h_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1., w_ratio=1., h_ratio=1.):
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
+    return get_suitable_adjust_params_basic(adjust_params_custom, left_space, bottom_space, right_space, top_space, w_space, h_space, left_ratio, bottom_ratio, right_ratio, top_ratio, w_ratio, h_ratio)
+
+
+def get_suitable_adjust_params_custom_3d(adjust_params_custom=None, left_space=False, bottom_space=False, right_space=False, top_space=False, w_space=False, h_space=False, left_ratio=1., bottom_ratio=1., right_ratio=1., top_ratio=1., w_ratio=1., h_ratio=1.):
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM_3D, adjust_params_custom)
+    return get_suitable_adjust_params_basic(adjust_params_custom, left_space, bottom_space, right_space, top_space, w_space, h_space, left_ratio, bottom_ratio, right_ratio, top_ratio, w_ratio, h_ratio)
 # endregion
 
 
-# region 通用函数(创建fig, ax)
-def get_fig_ax(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, fig_width=None, fig_height=None, sharex=False, sharey=False, subplots_params=None, adjust_params=False, ax_box_params=None, margin=None):
+# region 通用函数(获取,调整figsize)
+def get_adjust_params_from_custom(nrows=1, ncols=1, adjust_params_custom=None):
     '''
-    创建一个图形和轴对象，并根据提供的参数调整布局和轴的方框边缘。推荐的方式是设定ax_width和ax_height，而不是fig_width和fig_height。当设定ax_width和ax_height时，fig_width和fig_height会自动计算, 此时设定margin不会破坏ax框的比例
+        adjust_params_custom 含义: 此处left, right, top, bottom的值相对于ax, 而不是fig
+    '''
+    adjust_params = adjust_params_custom.copy()
+    adjust_params['left'] = adjust_params_custom['left'] / (ncols + adjust_params_custom['wspace'] * (ncols - 1) + 1 - adjust_params_custom['right'] + adjust_params_custom['left'])
+    adjust_params['right'] = 1 - (1 - adjust_params_custom['right']) / (ncols + adjust_params_custom['wspace'] * (ncols - 1) + 1 - adjust_params_custom['right'] + adjust_params_custom['left'])
+    adjust_params['bottom'] = adjust_params_custom['bottom'] / (nrows + adjust_params_custom['hspace'] * (nrows - 1) + 1 - adjust_params_custom['top'] + adjust_params_custom['bottom'])
+    adjust_params['top'] = 1 - (1 - adjust_params_custom['top']) / (nrows + adjust_params_custom['hspace'] * (nrows - 1) + 1 - adjust_params_custom['top'] + adjust_params_custom['bottom'])
+    return adjust_params
+
+
+def get_suitable_fig_size(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, margin=None, adjust_params=None, adjust_params_custom=None, which='auto'):
+    '''
+        adjust_params_custom 优先级高于 adjust_params 优先级高于 margin, 优先级高的参数会覆盖优先级低的参数(当which为auto时)
+
+        adjust_params_custom 含义: 此处left, right, top, bottom的值相对于ax, 而不是fig
+    '''
+    margin = update_dict(MARGIN, margin)
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
+    if adjust_params_custom and which in ['adjust_params_custom', 'auto']:
+        fig_width = ax_width * (ncols + adjust_params_custom['wspace'] * (ncols - 1)) + ax_width * (1 - adjust_params_custom['right'] + adjust_params_custom['left'])
+        fig_height = ax_height * (nrows + adjust_params_custom['hspace'] * (nrows - 1)) + ax_height * (1 - adjust_params_custom['top'] + adjust_params_custom['bottom'])
+    elif adjust_params and which in ['adjust_params', 'auto']:
+        fig_width = (ax_width * (ncols + adjust_params['wspace'] * (ncols - 1))) / (adjust_params['right'] - adjust_params['left'])
+        fig_height = (ax_height * (nrows + adjust_params['hspace'] * (nrows - 1))) / (adjust_params['top'] - adjust_params['bottom'])
+    elif margin and which in ['margin', 'auto']:
+        fig_width = ax_width / (margin['right'] - margin['left']) * ncols
+        fig_height = ax_height / (margin['top'] - margin['bottom']) * nrows
+    return fig_width, fig_height
+
+
+def set_fig_size(fig, width=None, height=None):
+    fig.set_size_inches(width, height)
+# endregion
+
+
+# region 通用函数(判断是fig还是subfig)
+def get_fig_type(obj):
+    """
+    判断给定的 matplotlib 对象是 Figure 还是 SubFigure.
+
+    参数:
+        obj: 要判断的对象，可以是 Figure, SubFigure 或其他 matplotlib 对象.
+
+    返回:
+        str: 返回 'fig' 如果对象是 Figure;
+             返回 'subfig' 如果对象是 SubFigure;
+             返回 'unknown' 如果对象不是这两者之一.
+    """
+    if isinstance(obj, Figure):
+        return 'fig'
+    elif isinstance(obj, SubFigure):
+        return 'subfig'
+    else:
+        return 'unknown'
+# endregion
+
+
+# region 通用函数(创建fig, ax, gs)
+def get_fig(width=AX_WIDTH, height=AX_HEIGHT, dpi=FIG_DPI, **kwargs):
+    '''
+        创建一个空白图形。
+    '''
+    return plt.figure(figsize=(width, height), dpi=dpi, **kwargs)
+
+
+def get_subfig(fig=None, nrows=1, ncols=1, squeeze=True, wspace=None, hspace=None, width_ratios=None, height_ratios=None, **kwargs):
+    if fig is None:
+        fig = plt.gcf()
+    subfig = fig.subfigures(nrows=nrows, ncols=ncols, squeeze=squeeze, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios, **kwargs)
+
+    # 动态给 subfigure 添加一个 get_size_inches 方法(因为set_ax需要使用figsize)
+    def get_size_inches(self):
+        return self.figure.get_size_inches()[0] / nrows, self.figure.get_size_inches()[1] / ncols
+
+    for s in get_iterable_ax(subfig):
+        s.get_size_inches = get_size_inches.__get__(s)
+    return subfig
+
+
+def get_fig_subfig(nrows=1, ncols=1, subfig_width=AX_WIDTH, subfig_height=AX_HEIGHT, fig_width=None, fig_height=None, dpi=FIG_DPI, get_fig_kwargs=None, subfig_kwargs=None):
+    '''
+        创建一个图形和子图对象。
+
+        利用subfig有几个好处: 
+        可以创建不均匀的ax,比如说左侧三个,右侧两个ax(先创建两个subfig然后利用get_ax分别创建ax,记得设置adjust_params或者adjust_params_custom而不是margin使得边框对齐)
+        可以更好的share_axis(比如说画两列图,左侧的图sharex,右侧的图sharey,这样就可以分别设置sharex和sharey)
+        可以更好的set_fig_title
+
+        利用subfig的缺点:
+        无法很好的控制ax_width和ax_height,因为fig_width和fig_height由subfig_width和subfig_height决定(需要在get_ax之后,根据subfig的数量和每个subfig的大小(利用get_suitable_fig_size)来手动重制fig的大小(set_fig_size),或者在创建时计算好fig的大小,利用get_suitable_fig_size)
+    '''
+    get_fig_kwargs = update_dict({}, get_fig_kwargs)
+    subfig_kwargs = update_dict({}, subfig_kwargs)
+    adjust_params = {'left': 0., 'right': 1., 'top': 1., 'bottom': 0., 'wspace': 0., 'hspace': 0.}
+    adjust_params = update_dict(adjust_params, subfig_kwargs)
+    local_fig_width, local_fig_height = get_suitable_fig_size(nrows, ncols, subfig_width, subfig_height, adjust_params=adjust_params, which='adjust_params')
+    if fig_width is None:
+        fig_width = local_fig_width
+    if fig_height is None:
+        fig_height = local_fig_height
+
+    fig = get_fig(fig_width, fig_height, dpi=dpi, **get_fig_kwargs)
+    subfig = get_subfig(nrows=nrows, ncols=ncols, fig=fig, **subfig_kwargs)
+    return fig, subfig
+
+
+def get_ax(fig=None, nrows=1, ncols=1, sharex=False, sharey=False, rm_repeat_tick_label_when_share=RM_REPEAT_TICK_LABEL_WHEN_SHARE, margin=None, squeeze=True, **subplots_params):
+    '''
+        在一个fig上创建多个ax
+
+        fig: 可以是fig也可以是subfig,如果是None,则使用plt.gcf()获取当前的fig
+        nrows, ncols: 行数和列数
+        sharex, sharey: 是否共享x轴和y轴(可以是'all', 'none', 'row', 'col', True, False)
+        rm_repeat_tick_label_when_share: 是否移除多余的tick label(当sharex或者sharey时)
+        margin: 边框空白大小(默认为None,即使用MARGIN)
+        squeeze: 是否压缩(nrows, ncols)中的1维
+        adjust_params: 字典,包含用于调用subplots_adjust的参数(不推荐使用,因为随着子图的数量的增加,这个参数会变得很难调整,因为这里的left,right,top,bottom是相对于整个fig的位置,而随着ax数量增加,fig的大小会变化)(如果要使用这个参数,推荐使用get_fig_gs,然后从gs获取ax,或者创建好ax之后,使用adjust_ax)
+        adjust_params_custom: 字典,含义: 此处left, right, top, bottom的值相对于ax, 而不是fig(推荐使用,不受子图数量的影响,但无法保证不同子图数量情形保证边框对齐)(如果要使用这个参数,推荐使用get_fig_gs,然后从gs获取ax,或者创建好ax之后,使用adjust_ax_custom)
+
+        注意: 在某个fig或者subfig上创建ax,使用ax.figure或者fig.get_figure()都可以得到这个fig或者subfig(而不是最一开始最大的fig)
+    '''
+    if fig is None:
+        fig = plt.gcf()
+    margin = update_dict(MARGIN, margin)
+
+    if not isinstance(sharex, str):
+        sharex = "all" if sharex else "none"
+    if not isinstance(sharey, str):
+        sharey = "all" if sharey else "none"
+
+    ax = np.empty((nrows, ncols), dtype=object)
+    for i in range(nrows):
+        for j in range(ncols):
+            shared_with = {"none": None, "all": ax[0, 0],
+                            "row": ax[i, 0], "col": ax[0, j]}
+            ax[i, j] = fig.add_subplot(nrows, ncols, i * ncols + j + 1, sharex=shared_with[sharex], sharey=shared_with[sharey], **subplots_params)
+
+    if rm_repeat_tick_label_when_share:
+        # 移除多余的label
+        if sharex in ["col", "all"]:
+            for a in ax.flat:
+                a._label_outer_xaxis(skip_non_rectangular_axes=True)
+        if sharey in ["row", "all"]:
+            for a in ax.flat:
+                a._label_outer_yaxis(skip_non_rectangular_axes=True)
+
+    # 设置ax的位置
+    set_relative_ax_position(ax, nrows, ncols, margin=margin)
+    
+    if squeeze:
+        ax = squeeze_ax(ax)
+
+    # 添加label
+    set_ax_label(ax)
+
+    # 略微修改label
+    for a in get_iterable_ax(ax):
+        set_ax_label(a, concat_str(['get_ax', a.get_label()]))
+    return ax
+
+
+def adjust_ax(ax, adjust_params=None):
+    '''
+    调整ax的位置
+
+    注意:
+    对于后续生成的ax_inside_ax,无法使用这个函数调整位置,并且使用这个函数还会影响原先的ax的位置;但是对于subfig内部的ax,可以使用这个函数调整位置(并且会相对于subfig调整位置)
+    '''
+    adjust_params = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params)
+    for a in get_iterable_ax(ax):
+        a.figure.subplots_adjust(**adjust_params)
+        break
+    return ax # 不接收也可以
+
+
+def adjust_ax_custom(ax, ncols=None, nrows=None, adjust_params_custom=None):
+    '''
+    调整ax的位置,此处left, right, top, bottom的值相对于ax, 而不是fig
+
+    注意:
+    对于后续生成的ax_inside_ax,无法使用这个函数调整位置,并且使用这个函数还会影响原先的ax的位置;但是对于subfig内部的ax,可以使用这个函数调整位置(并且会相对于subfig调整位置)
+    '''
+    # 从ax中获取ncols和nrows
+    if isinstance(ax, plt.Axes):
+        ncols, nrows = 1, 1
+    elif isinstance(ax, np.ndarray):
+        if ax.ndim == 1:
+            raise ValueError("The number of rows and columns cannot be inferred from a 1D array of axes, must provide 'ncols' and 'nrows'.")
+        nrows, ncols = ax.shape
+
+    # 调整
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
+    adjust_params = get_adjust_params_from_custom(ncols=ncols, nrows=nrows, adjust_params_custom=adjust_params_custom)
+    adjust_ax(ax, adjust_params)
+    return ax # 不接收也可以
+
+
+def get_fig_ax(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, fig_width=None, fig_height=None, sharex=False, sharey=False, rm_repeat_tick_label_when_share=RM_REPEAT_TICK_LABEL_WHEN_SHARE, subplots_params=None, squeeze=True, margin=None):
+    '''
+    创建一个图形和轴对象，并根据提供的参数调整布局和轴的方框边缘。
+    推荐的方式是设定ax_width和ax_height，而不是fig_width和fig_height。当设定ax_width和ax_height时，fig_width和fig_height会自动计算, 此时设定margin或adjust_params不会破坏ax框的比例
     如果想要先把fig分成等分,然后在每个等分里设置框的位置,使用margin
-    如果想要最外层的图有自己单独的距离图像边框的范围,使用adjust_params,示例:adjust_params={'left': 0.2, 'right': 0.8, 'top': 0.8, 'bottom': 0.2, 'wspace': 0.5, 'hspace': 0.5}
+    如果想要最外层的图有自己单独的距离图像边框的范围,使用adjust_params和adjust_params_custom,并且使用get_fig_gs,再从gs获取ax;示例:adjust_params={'left': 0.2, 'right': 0.8, 'top': 0.8, 'bottom': 0.2, 'wspace': 0.5, 'hspace': 0.5},这里的left,right,top,bottom是相对于整个fig的位置(可以理解为最外围的pad),wspace和hspace是子图之间的间距(相对于average width和average height)
+
+    注意:
+    本函数只支持等大的ax,如果需要不等大的,可以使用merge_ax,split_ax来获得;或者使用subfig来创建不等大的ax
+
     Parameters:
     - figsize: 元组，指定图形的宽度和高度。
-    - adjust_params: 字典，包含用于调用subplots_adjust的参数。
-    - ax_box_params: 字典，包含用于设置轴方框边缘样式的参数（如边框颜色和宽度）。
+    - nrows, ncols: 整数，指定子图的行数和列数。
+    - ax_width, ax_height: 浮点数，指定子图的宽度和高度。
+    - fig_width, fig_height: 浮点数，指定图形的宽度和高度。(优先级高于ax_width和ax_height,如果设置了则会覆盖ax_width和ax_height的设置)
+    - sharex, sharey: 布尔值或字符串，指定是否共享x轴和y轴。(可以是'all', 'none', 'row', 'col', True, False)
+    - rm_repeat_tick_label_when_share: 布尔值，指定是否移除多余的刻度标签(当sharex或者sharey时)
 
     Returns:
     - fig, ax: 创建的图形和轴对象。
     '''
-    if subplots_params is None:
-        subplots_params = {}
+    subplots_params = update_dict({}, subplots_params)
     margin = update_dict(MARGIN, margin)
+
+    # 计算fig的宽度和高度
+    local_fig_width, local_fig_height = get_suitable_fig_size(nrows=nrows, ncols=ncols, ax_width=ax_width, ax_height=ax_height, margin=margin, which='margin')
     if fig_width is None:
-        fig_width = ax_width / ( margin['right'] - margin['left'] ) * ncols
+        fig_width = local_fig_width
     if fig_height is None:
-        fig_height = ax_height / ( margin['top'] - margin['bottom'] ) * nrows
-    figsize = (fig_width, fig_height)
+        fig_height = local_fig_height
 
-    fig, ax = plt.subplots(nrows, ncols, figsize=figsize,
-                           sharex=sharex, sharey=sharey, **subplots_params)
-
-    # 如果提供了轴方框边缘参数，则应用这些样式
-    if ax_box_params:
-        for spine in ax.spines.values():
-            spine.set(**ax_box_params)
-
-    # 设置ax的位置
-    set_relative_ax_position(ax, nrows, ncols, margin=margin)
-
-    # 如果提供了调整参数，则应用这些参数
-    if adjust_params:
-        fig.subplots_adjust(**adjust_params)
-
+    # 创建图形和轴对象
+    fig = get_fig(width=fig_width, height=fig_height)
+    ax = get_ax(fig=fig, nrows=nrows, ncols=ncols, sharex=sharex, sharey=sharey, rm_repeat_tick_label_when_share=rm_repeat_tick_label_when_share, margin=margin, squeeze=squeeze, **subplots_params)
     return fig, ax
 
 
@@ -9820,21 +11464,234 @@ def get_fig_ax_3d(**kwargs):
     if 'subplots_params' not in kwargs:
         kwargs['subplots_params'] = {}
 
-    # Ensure 'subplot_kw' exists in 'subplots_params'
-    if 'subplot_kw' not in kwargs['subplots_params']:
-        kwargs['subplots_params']['subplot_kw'] = {}
-
-    # Update the 'projection' in 'subplot_kw'
-    kwargs['subplots_params']['subplot_kw']['projection'] = '3d'
+    # Ensure 'projection' is set to '3d'
+    if 'projection' not in kwargs['subplots_params']:
+        kwargs['subplots_params']['projection'] = '3d'
 
     # Update the margin
     kwargs['margin'] = update_dict(MARGIN_3D, kwargs.get('margin'))
     return get_fig_ax(**kwargs)
+
+
+def get_gs_original(fig=None, nrows=1, ncols=1, left=None, bottom=None, right=None, top=None, wspace=None, hspace=None, width_ratios=None, height_ratios=None):
+    '''
+    获取一个GridSpec对象。(不推荐使用,因为随着子图的数量的增加,这个参数会变得很难调整,因为这里的left,right,top,bottom是相对于整个fig的位置,而随着ax数量增加,fig的大小会变化,对于相同的值边框空白大小会不同,无法对齐)
+
+    注意:
+    对于gs,其始终是2维的,即使是1行或者1列
+    '''
+    # 如果没有提供figure,则使用当前的图形
+    if fig is None:
+        fig = plt.gcf()
+    return GridSpec(nrows, ncols, figure=fig, left=left, bottom=bottom, right=right, top=top, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
+
+
+def get_gs_custom(fig=None, nrows=1, ncols=1, left=None, bottom=None, right=None, top=None, wspace=None, hspace=None, width_ratios=None, height_ratios=None):
+    '''
+    获取一个GridSpec对象。但是left等参数是相对于ax的位置,而不是fig的位置
+
+    注意:
+    对于gs,其始终是2维的,即使是1行或者1列
+    '''
+    adjust_params_custom = dict(left=left, bottom=bottom, right=right, top=top, wspace=wspace, hspace=hspace)
+    adjust_params_custom = update_dict_ignore(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
+    adjust_params = get_adjust_params_from_custom(nrows=nrows, ncols=ncols, adjust_params_custom=adjust_params_custom)
+    return get_gs_original(nrows=nrows, ncols=ncols, fig=fig, width_ratios=width_ratios, height_ratios=height_ratios, **adjust_params)
+
+
+def get_fig_gs_original(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, fig_width=None, fig_height=None, dpi=FIG_DPI, get_fig_kwargs=None, adjust_params=None):
+    '''
+    获取fig和gs
+
+    注意:
+    此函数只支持等大的ax,如果需要不等大的,可以使用merge_ax,split_ax来获得;或者使用subfig来创建不等大的ax
+    根据ax_width和ax_height来计算fig的大小,如果fig_width和fig_height不为None,则会覆盖ax_width和ax_height的设置
+    '''
+    get_fig_kwargs = update_dict({}, get_fig_kwargs)
+    adjust_params = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params)
+
+    # 计算fig的宽度和高度
+    local_fig_width, local_fig_height = get_suitable_fig_size(nrows=nrows, ncols=ncols, ax_width=ax_width, ax_height=ax_height, adjust_params=adjust_params, which='adjust_params')
+    if fig_width is None:
+        fig_width = local_fig_width
+    if fig_height is None:
+        fig_height = local_fig_height
+
+    # 创建图形和GridSpec对象
+    fig = get_fig(width=fig_width, height=fig_height, dpi=dpi, **get_fig_kwargs)
+    gs = get_gs_original(nrows=nrows, ncols=ncols, fig=fig, **adjust_params)
+    return fig, gs
+
+
+def get_fig_gs_custom(nrows=1, ncols=1, ax_width=AX_WIDTH, ax_height=AX_HEIGHT, fig_width=None, fig_height=None, dpi=FIG_DPI, get_fig_kwargs=None, adjust_params_custom=None):
+    '''
+    获取fig和gs
+
+    注意:
+    此函数只支持等大的ax,如果需要不等大的,可以使用merge_ax,split_ax来获得;或者使用subfig来创建不等大的ax
+    根据ax_width和ax_height来计算fig的大小,如果fig_width和fig_height不为None,则会覆盖ax_width和ax_height的设置
+    '''
+    get_fig_kwargs = update_dict({}, get_fig_kwargs)
+    adjust_params_custom = update_dict(ADJUST_PARAMS_CUSTOM, adjust_params_custom)
+
+    # 计算fig的宽度和高度
+    local_fig_width, local_fig_height = get_suitable_fig_size(nrows=nrows, ncols=ncols, ax_width=ax_width, ax_height=ax_height, adjust_params_custom=adjust_params_custom, which='adjust_params_custom')
+    if fig_width is None:
+        fig_width = local_fig_width
+    if fig_height is None:
+        fig_height = local_fig_height
+
+    # 创建图形和GridSpec对象
+    fig = get_fig(width=fig_width, height=fig_height, dpi=dpi, **get_fig_kwargs)
+    gs = get_gs_custom(nrows=nrows, ncols=ncols, fig=fig, **adjust_params_custom)
+    return fig, gs
+
+
+def get_gs_inside_ax(ax, nrows=1, ncols=1, wspace=None, hspace=None, width_ratios=None, height_ratios=None):
+    '''
+    以ax的位置为基础获取一个GridSpec对象。
+    '''
+    left, right, bottom, top = get_ax_position_custom(ax)
+    fig = ax.figure
+    return get_gs_original(fig=fig, nrows=nrows, ncols=ncols, left=left, bottom=bottom, right=right, top=top, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
+
+
+def get_all_ax_from_gs(gs, sharex=False, sharey=False, rm_repeat_tick_label_when_share=RM_REPEAT_TICK_LABEL_WHEN_SHARE, squeeze=True, **kwargs):
+    '''
+    从GridSpec对象中获取所有的轴对象。
+    '''
+    if not isinstance(sharex, str):
+        sharex = "all" if sharex else "none"
+    if not isinstance(sharey, str):
+        sharey = "all" if sharey else "none"
+
+    ax = np.empty((gs.nrows, gs.ncols), dtype=object)
+    for i in range(gs.nrows):
+        for j in range(gs.ncols):
+            shared_with = {"none": None, "all": ax[0, 0],
+                            "row": ax[i, 0], "col": ax[0, j]}
+            ax[i, j] = get_ax_from_gs(gs, index=(i, j), sharex=shared_with[sharex], sharey=shared_with[sharey], **kwargs)
+
+    if rm_repeat_tick_label_when_share:
+        # 移除多余的label
+        if sharex in ["col", "all"]:
+            for a in ax.flat:
+                a._label_outer_xaxis(skip_non_rectangular_axes=True)
+        if sharey in ["row", "all"]:
+            for a in ax.flat:
+                a._label_outer_yaxis(skip_non_rectangular_axes=True)
+    
+    if squeeze:
+        ax = squeeze_ax(ax)
+    
+    # 添加label
+    set_ax_label(ax)
+
+    # 略微修改label
+    for a in get_iterable_ax(ax):
+        set_ax_label(a, concat_str(['get_all_ax_from_gs', a.get_label()]))
+    return ax
+
+
+def get_ax_from_gs(gs, index=None, **kwargs):
+    '''
+    从GridSpec对象中获取轴对象。
+
+    参数:
+    gs: 可以是完整的gs,也可以是索引之后的gs(如果是索引之后的gs,则index必须为None)
+    index: 默认为None,表示获取整个gs的ax,如果是tuple,则表示获取gs[index]的ax;注意,完整的gs无法直接用于获取ax,需要使用[:]索引才可以
+    '''
+    fig = gs.figure
+    if index is None:
+        try:
+            ax = fig.add_subplot(gs[:], **kwargs) # 使用gs,如果是原始的gs,必须要索引,否则会报错
+        except:
+            ax = fig.add_subplot(gs, **kwargs) # 为了防止用户传入索引之后的gs,这里使用gs再次尝试
+    else:
+        if not isinstance(index, tuple):
+            raise ValueError('Index must be a tuple.')
+        ax = fig.add_subplot(gs[index], **kwargs)
+    
+    # 添加label
+    set_ax_label(ax, index)
+
+    # 略微修改label
+    for a in get_iterable_ax(ax):
+        set_ax_label(a, concat_str(['get_ax_from_gs', a.get_label()]))
+    return ax
+
+
+def get_all_subfig_from_gs(gs, squeeze=True):
+    subfig = np.empty((gs.nrows, gs.ncols), dtype=object)
+    for i in range(gs.nrows):
+        for j in range(gs.ncols):
+            subfig[i, j] = get_subfig_from_gs(gs, index=(i, j))
+    if squeeze:
+        subfig = squeeze_ax(subfig)
+    return subfig
+
+
+def get_subfig_from_gs(gs, index=None, **kwargs):
+    '''
+    从GridSpec对象中获取子图对象。
+
+    参数:
+    gs: 可以是完整的gs,也可以是索引之后的gs(如果是索引之后的gs,则index必须为None)
+    index: 默认为None,表示获取整个gs的subfig,如果是tuple,则表示获取gs[index]的subfig;注意,完整的gs无法直接用于获取subfig,需要使用[:]索引才可以
+    '''
+    # 利用添加ax来获取需要的width和height
+    ax = get_ax_from_gs(gs, index=index)
+    width, height = get_ax_size(ax)
+    rm_ax(ax)
+    
+    fig = gs.figure
+    if index is None:
+        try:
+            subfig = fig.add_subfigure(gs[:], **kwargs) # 使用gs,如果是原始的gs,必须要索引,否则会报错
+        except:
+            subfig = fig.add_subfigure(gs, **kwargs) # 为了防止用户传入索引之后的gs,这里使用gs再次尝试
+    else:
+        if not isinstance(index, tuple):
+            raise ValueError('Index must be a tuple.')
+        subfig = fig.add_subfigure(gs[index], **kwargs)
+
+    # 动态给 subfigure 添加一个 get_size_inches 方法(因为set_ax需要使用figsize)
+    def get_size_inches(self):
+        return width, height
+
+    for s in get_iterable_ax(subfig):
+        s.get_size_inches = get_size_inches.__get__(s)
+    return subfig
+
+
+def get_subfig_inside_ax(ax, nrows=1, ncols=1, squeeze=True, wspace=None, hspace=None, width_ratios=None, height_ratios=None):
+    '''
+    以ax的位置为基础获取一个subfig对象
+    '''
+    gs = get_gs_inside_ax(ax, nrows=nrows, ncols=ncols, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
+    return get_all_subfig_from_gs(gs, squeeze=squeeze)
+
+
+def get_ax_inside_ax(ax, nrows=1, ncols=1, wspace=None, hspace=None, width_ratios=None, height_ratios=None, sharex=False, sharey=False, squeeze=True, keep_original=False, **kwargs):
+    '''
+    只是copy了split_ax_by_gs的代码,所有功能一致
+    '''
+    return split_ax_by_gs(ax, nrows=nrows, ncols=ncols, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios, sharex=sharex, sharey=sharey, squeeze=squeeze, keep_original=keep_original, **kwargs)
+
+
+def get_gs_inside_gs(gs, index=None, nrows=1, ncols=1, wspace=None, hspace=None, width_ratios=None, height_ratios=None):
+    '''
+    从GridSpec对象中获取一个新的GridSpec对象。实现方式是先创建ax,使用get_gs_inside_ax获取gs,再删除ax
+    '''
+    ax = get_ax_from_gs(gs, index=index)
+    sub_gs = get_gs_inside_ax(ax, nrows=nrows, ncols=ncols, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
+    rm_ax(ax)
+    return sub_gs
 # endregion
 
 
 # region 通用函数(保存图像)
-def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=True, **kwargs):
+def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=True, ax=None, **kwargs):
     '''
     保存图形到指定的文件格式(搭配concat_str使用,concat_str可以用于生成文件名)
 
@@ -9867,22 +11724,23 @@ def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inch
 
     # 保存fig到pkl
     if pkl:
-        save_pkl(fig, f'{filename}.pkl')
+        save_pkl((fig, ax), f'{filename}.pkl')
 
     if close:
         plt.close(fig)
+        fig = None
 
 
-def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pad_inches=PAD_INCHES, filename_process=None, pkl=False, **kwargs):
+def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pad_inches=PAD_INCHES, filename_process=None, pkl=False, ax=None, **kwargs):
     '''
     轻量级的保存图形函数,只保存位图,降低dpi,不保存pkl
     并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
     '''
     formats = [SAVEFIG_RASTER_FORMAT]
-    save_fig(fig, filename, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pad_inches=pad_inches, filename_process=filename_process, pkl=pkl, **kwargs)
+    save_fig(fig, filename, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pad_inches=pad_inches, filename_process=filename_process, pkl=pkl, ax=ax, **kwargs)
 
 
-def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pkl=True, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
+def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pkl=True, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
     '''
     保存3D图形的多个视角，对于每个视角，都会生成图片（并在文件名上加入角度），然后将图片合成视频。
     对于filename,如果以'.png','.pdf'或'.eps'结尾,则按照后缀名保存,否则按照formats列表中的格式保存。
@@ -9916,13 +11774,13 @@ def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), 
             local_filename = f'{filename}_elev_{str(int(elev))}_azim_{str(int(azim))}'
             # 注意这里不能close,并且不重复存储pkl
             save_fig(fig=fig, filename=local_filename, formats=formats,
-                        dpi=dpi, close=False, bbox_inches=bbox_inches, pkl=False, **savefig_kwargs)
+                        dpi=dpi, close=False, bbox_inches=bbox_inches, pkl=False, ax=ax, **savefig_kwargs)
             fig_paths_dict[(elev, azim)] = fig_paths_dict.get((elev, azim), []) + [local_filename]
             fig_paths_list.append(local_filename)
 
     # 保存fig到pkl
     if pkl:
-        save_pkl(fig, f'{filename}.pkl')
+        save_pkl((fig, ax), f'{filename}.pkl')
 
     if close:
         plt.close(fig)
@@ -9939,13 +11797,61 @@ def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), 
     return fig_paths_dict, fig_paths_list
 
 
-def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pkl=False, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
+def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pkl=False, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
     '''
     轻量级的保存3D图形的多个视角,只保存位图,降低dpi,不保存pkl,不生成视频,减少了azim_list的数量
     并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
     '''
     formats = [SAVEFIG_RASTER_FORMAT]
-    save_fig_3d(fig, filename, elev_list=elev_list, azim_list=azim_list, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pkl=pkl, generate_video=generate_video, frame_rate=frame_rate, delete_figs=delete_figs, video_formats=video_formats, savefig_kwargs=savefig_kwargs)
+    save_fig_3d(fig, filename, elev_list=elev_list, azim_list=azim_list, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pkl=pkl, ax=ax, generate_video=generate_video, frame_rate=frame_rate, delete_figs=delete_figs, video_formats=video_formats, savefig_kwargs=savefig_kwargs)
+# endregion
+
+
+# region 通用函数(复制ax)
+def copy_ax_content(source_ax, target_ax):
+    """
+    将 source_ax 的内容拷贝到 target_ax 中，保持所有图形元素（如线条、散点、图例等）。
+    
+    参数:
+    source_ax (matplotlib.axes.Axes): 源 Axes 对象。
+    target_ax (matplotlib.axes.Axes): 目标 Axes 对象。
+    """
+    # 复制线条
+    for line in source_ax.get_lines():
+        target_ax.plot(line.get_xdata(), line.get_ydata(), label=line.get_label(),
+                       color=line.get_color(), linestyle=line.get_linestyle(),
+                       linewidth=line.get_linewidth(), marker=line.get_marker())
+
+    # 复制散点图 (PathCollection)
+    for collection in source_ax.collections:
+        offsets = collection.get_offsets()  # 获取散点的位置
+        colors = collection.get_facecolors()  # 获取散点的颜色
+        sizes = collection.get_sizes()  # 获取散点的大小
+        target_ax.scatter(offsets[:, 0], offsets[:, 1], c=colors, s=sizes, label=collection.get_label())
+
+    # 复制标题和标签
+    target_ax.set_title(source_ax.get_title())
+    target_ax.set_xlabel(source_ax.get_xlabel())
+    target_ax.set_ylabel(source_ax.get_ylabel())
+
+    # 复制图例
+    if source_ax.get_legend() is not None:
+        target_ax.legend()
+
+    # 复制刻度标签
+    target_ax.set_xticks(source_ax.get_xticks())
+    target_ax.set_xticklabels(source_ax.get_xticklabels())
+    target_ax.set_yticks(source_ax.get_yticks())
+    target_ax.set_yticklabels(source_ax.get_yticklabels())
+
+    # 复制坐标轴的限制
+    target_ax.set_xlim(source_ax.get_xlim())
+    target_ax.set_ylim(source_ax.get_ylim())
+
+    # 复制网格
+    # target_ax.grid(source_ax._gridOnMajor)
+
+    # 如果有其他内容（比如文本），可以根据需要扩展
 # endregion
 
 
