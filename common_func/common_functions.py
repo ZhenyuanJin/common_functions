@@ -25,6 +25,7 @@ from io import StringIO
 import copy
 import hashlib
 import json
+import logging
 
 
 # 数学和科学计算库
@@ -59,7 +60,6 @@ from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 import matplotlib.collections as mcoll
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D
 from PIL import Image
 import cv2
@@ -412,6 +412,17 @@ def estimate_array_memory(shape, data_type='float64', unit='gb'):
         raise ValueError("Invalid unit. Please choose from 'bytes', 'kb', 'mb', or 'gb'.")
 
     return memory_estimate
+# endregion
+
+
+# region 获取储存大小
+def get_storage_size():
+    '''
+    du -h --max-depth=1 /path/to/directory (查看目录下所有文件夹的大小)
+    df -h (查看磁盘空间)
+    du -sh /path/to/directory (查看目录大小)
+    '''
+    pass
 # endregion
 
 
@@ -957,33 +968,162 @@ def better_print(variable, name=None, n=PRINT_WIDTH, char=PRINT_CHAR, lite=True,
 
 # region log
 class Capturing(list):
+    '''
+    利用此类,和with语句,可以捕捉print输出,并保存到log中(见Logger类的capture方法)
+    '''
+    def __init__(self, loggers=None, print_to_console=True):
+        super().__init__()
+        self.loggers = loggers if isinstance(loggers, list) else [loggers]  # Store multiple loggers in a list
+        self.print_to_console = print_to_console  # Control real-time console printing
+        self._buffer = ''  # Temporary storage to reduce unnecessary newlines
+
     def __enter__(self):
         self._stdout = sys.stdout
-        sys.stdout = self._stringio = StringIO()
+        sys.stdout = self
         return self
+
     def __exit__(self, *args):
-        self.extend(self._stringio.getvalue().splitlines())
-        del self._stringio
         sys.stdout = self._stdout
+
+    def write(self, message):
+        # Accumulate content in the buffer
+        self._buffer += message
+        # Process buffer when a newline character is encountered
+        if '\n' in self._buffer:
+            self._log_message(self._buffer)
+            self._buffer = ''  # Clear the buffer
+
+    def flush(self):
+        # Ensure any remaining content is written out when flush() is called
+        if self._buffer:
+            self._log_message(self._buffer)
+            self._buffer = ''
+
+    def _log_message(self, message):
+        message = message.strip()  # Strip extra whitespace and newlines
+        if message:  # Ensure it's not an empty message
+            self.append(message)
+            if self.print_to_console:
+                self._stdout.write(message + '\n')
+                self._stdout.flush()
+            # Log message to each logger if loggers are provided
+            if self.loggers:
+                for logger in self.loggers:
+                    logger.add(message, end='\n')
 
 
 class Logger:
     '''
-        需要利用logger.prt等来同时打印和记录log
-        add方法只记录log不打印
+    需要利用logger.prt等来同时打印和记录log
+    add方法只记录log不打印
+    
+    使用方法:
+
+    - 使用logger的prt
+    logger = Logger()
+    logger.prt('message')
+    
+    - 利用python logging库实现,实时保存到文件
+    logger.get_py_logger(filename='log.txt', name='logger')
+    logger.py_logger即为python logging库的logger,可以按照python logging库的方式使用
+
+    - 捕捉其他函数的print
+    new_func = logger.capture(func)
+    new_func(*args, **kwargs)
+
+    - 捕捉其他class的print
+    new_class = logger.capture(class)
+    nc = new_class(*args, **kwargs)
+    nc.some_method()
+
+    - 捕捉某个代码块的print
+    with Capturing(loggers=logger):
+        some_code
+
+    - 使用多个logger同时捕捉某个代码块的print
+    with Capturing(loggers=[logger1, logger2]):
+        some_code
+    
+    - 不使用with语句,直接捕捉print(记得手动调用end)
+    cm = CaptureManager(loggers=[logger1, logger2]) 不需要调用enter,init中已经调用了
+    some_code
+    cm.end()
+
+    - CaptureManager也可以使用with语句
+    
+    - 只添加log不打印
+    logger.add('message')
     '''
     def __init__(self, n=PRINT_WIDTH, char=PRINT_CHAR, prt_mode=True, lite=True, print_title=True):
+        '''
+        prt_mode -- 是否打印
+        '''
+        # 自定义的log和参数
         self.log = []
         self.n = n
         self.char = char
         self.prt_mode = prt_mode
         self.lite = lite
         self.print_title = print_title
+        # python logging库的logger(先设置为None)
+        self.py_logger = None
 
-    def prt(self, message=''):
+    def get_py_logger(self, filename, name='', level=logging.DEBUG, format=None, datefmt='%Y-%m-%d %H:%M:%S', filemode='w', print_to_console=False):
+        '''
+        注意: 特别不建议打开print_to_console,因为使用普通的抓取时,由于记录到logger中,这里会重复打印一遍
+        '''
+        # 从filename中获取basedir
+        self.basedir = os.path.dirname(filename)
+        mkdir(self.basedir)
+
+        # 设置format
+        if format is None:
+            if name == '':
+                format = '%(asctime)s - %(levelname)s - %(message)s'
+            else:
+                format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+        # 获取python logging库的logger,注意,获得py_logger后,本类的所有方法才会记录到py_logger中
+        self.py_logger = logging.getLogger(name)
+
+        # 配置日志格式
+        formatter = logging.Formatter(format, datefmt=datefmt)
+
+        # 移除之前的所有处理器
+        self.py_logger.handlers.clear()
+
+        # 配置文件处理器
+        if filename:
+            file_handler = logging.FileHandler(filename, mode=filemode)
+            file_handler.setFormatter(formatter)
+            self.py_logger.addHandler(file_handler)
+
+        # 配置控制台处理器(如果设置了会同时打印到控制台)
+        if print_to_console:
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            self.py_logger.addHandler(console_handler)
+
+        # 设置日志级别
+        self.py_logger.setLevel(level)
+
+    def prt(self, *message, end='\n'):
         if self.prt_mode:
-            print(message)
-        self.log.append(message)
+            print(*message)
+        for i, m in enumerate(message):
+            self.log.append(m)
+            if i < len(message) - 1:
+                s = ' '
+            else:
+                s = end
+            if s is not None:
+                self.log.append(s)
+        if self.py_logger is not None:
+            # 如果message只是一个'\n',则跳过
+            if len(message) == 1 and message[0] == '\n':
+                pass
+            else:
+                self.py_logger.info(' '.join(message))
 
     def prt_sep(self):
         flex_print_sep(print_func=self.prt, n=self.n, char=self.char)
@@ -1015,8 +1155,21 @@ class Logger:
     def func_tester(self, func, multi_result=False):
         return flex_func_tester(func, print_func=self.prt, lite=self.lite, multi_result=multi_result)
 
-    def add(self, message=''):
-        self.log.append(message)
+    def add(self, *message, end='\n'):
+        for i, m in enumerate(message):
+            self.log.append(m)
+            if i < len(message) - 1:
+                s = ' '
+            else:
+                s = end
+            if s is not None:
+                self.log.append(s)
+        if self.py_logger is not None:
+            # 如果message只是一个'\n',则跳过
+            if len(message) == 1 and message[0] == '\n':
+                pass
+            else:
+                self.py_logger.info(' '.join(message))
 
     def add_sep(self):
         flex_print_sep(print_func=self.add, n=self.n, char=self.char)
@@ -1050,72 +1203,75 @@ class Logger:
         '''将func_tester仅添加到log中'''
         return flex_func_tester(func, print_func=self.add, lite=self.lite, multi_result=multi_result)
 
-    def capture(self, func):
+    def capture(self, obj, print_to_console=True):
         '''
-        收集func中的print到log中。
+        收集obj中的print到log中
+        如果obj是函数,则捕获其print输出
+        如果obj是类,则捕获类中所有方法的print输出
         
         参数:
-        - func: 要装饰的函数
+        - obj: 要装饰的函数或类
+        - print_to_console: 是否打印到控制台,默认为True
         
         返回:
-        - 装饰后的函数
+        - 装饰后的函数或类
         '''
-        @wraps(func)
+        if isinstance(obj, type):  # 检查是否为类
+            # 创建一个新的类，继承自原始类
+            class_name = obj.__name__
+            decorated_class = type(class_name, (obj,), {})
+            
+            # 遍历类中的所有方法
+            for attr_name, attr_value in obj.__dict__.items():
+                if callable(attr_value):  # 只处理可调用的方法
+                    # 将捕获装饰器应用到每个方法
+                    setattr(decorated_class, attr_name, 
+                        self._capture_method(attr_value, print_to_console))
+            return decorated_class
+        elif callable(obj):  # 如果是函数或方法
+            return self._capture_method(obj, print_to_console)
+        else:
+            raise TypeError("capture只支持函数或类")
+
+    def _capture_method(self, method, print_to_console):
+        '''
+        为函数或方法应用捕获装饰器
+        '''
+        @wraps(method)
         def wrapper(*args, **kwargs):
-            '''
-            装饰器内部函数，将func中的print输出收集到log中。
-            
-            参数:
-            - args: 传递给func的位置参数
-            - kwargs: 传递给func的关键字参数
-            
-            返回:
-            - func的返回值
-            '''
-            with Capturing() as output:
-                result = func(*args, **kwargs)
-            for line in output:
-                self.log.append(line)
-            return result
+            with Capturing(loggers=self, print_to_console=print_to_console):
+                return method(*args, **kwargs)
         return wrapper
 
-    def save(self, basedir='./', filename=None, mode='w'):
+    def save(self, basedir=None, filename=None, mode='w'):
+        if self.py_logger is not None:
+            basedir = self.basedir
         mkdir(basedir)
         if filename is None:
-            filename = 'log.log'
+            filename = 'brief.log'
         elif not filename.endswith('.log'):
             filename += '.log'
         with open(os.path.join(basedir, filename), mode=mode) as f:
             for line in self.log:
-                if line.endswith('\n'):
-                    f.write(line)
-                else:
-                    f.write(line + '\n')
+                f.write(line)
 
 
-class PrintLogger(Logger):
+class CaptureManager:
     '''
-        重定向print到log中
+    输入loggers,开始后,会将print输出保存到log中(initialize后,立即开始捕获;使用结束后,注意调用end;或者使用with语句打开)
     '''
-    def __init__(self, n=PRINT_WIDTH, char=PRINT_CHAR, lite=True, print_title=True):
-        super().__init__(n=n, char=char, prt_mode=True, lite=lite, print_title=print_title)
-        self.terminal = sys.stdout
-        self.original_stdout = sys.stdout
-        sys.stdout = self
+    def __init__(self, loggers, print_to_console=True):
+        self.capture_print = Capturing(loggers=loggers, print_to_console=print_to_console)
+        self.capture_print.__enter__()
 
-    def prt(self, message=''):
-        print(message)
-        # 删除了log.append(message)这一行,因为这样会导致log中的内容重复
+    def __enter__(self):
+        pass
 
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.append(message)
-
-    def flush(self):
-        self.terminal.flush()
-
-    def back_to_normal(self):
-        sys.stdout = self.original_stdout
+    def __exit__(self, *args):
+        self.capture_print.__exit__()
+    
+    def end(self):
+        self.capture_print.__exit__()
 # endregion
 
 
@@ -8025,6 +8181,7 @@ def add_marginal_distribution(ax, data, side_ax=None, side_ax_position='right', 
         else:
             if side_ax_position in ['right', 'bottom']:
                 side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=1-side_ax_size, sharex=True if side_ax_position == 'bottom' else False, sharey=True if side_ax_position == 'right' else False, keep_original_ax='top' if side_ax_position == 'bottom' else 'left')
+                # side_ax = 
             elif side_ax_position in ['left', 'top']:
                 side_ax = split_ax(ax, orientation=split_orientation, pad=side_ax_pad, ratio=side_ax_size, sharex=True if side_ax_position == 'top' else False, sharey=True if side_ax_position == 'left' else False, keep_original_ax='bottom' if side_ax_position == 'top' else 'right')
 
@@ -10418,6 +10575,23 @@ def rgb_to_rgba(rgb, alpha=1.0):
 # endregion
 
 
+# region 通用函数(散点大小)
+def get_suitable_s(ax, num):
+    '''
+    根据ax的大小和num的数量,返回合适的s值,实际使用时,可以先使用这个值,然后再根据实际情况在此基础上进行调整
+
+    注意:
+    s指的是面积,并且是以点的平方为单位的
+    '''
+    ax_width, ax_height = get_ax_size(ax)
+    ax_width_point = inch_to_point(ax_width)
+    ax_height_point = inch_to_point(ax_height)
+    s = np.pi * (np.min([ax_width_point, ax_height_point]) / np.sqrt(num)) ** 2
+    s = np.min([s, 70.])
+    return s
+# endregion
+
+
 # region 通用函数(transform)
 def map_transform(x, y, source_transform, target_transform):
     """
@@ -12199,6 +12373,23 @@ def copy_ax_content(source_ax, target_ax):
         sizes = collection.get_sizes()  # 获取散点的大小
         target_ax.scatter(offsets[:, 0], offsets[:, 1], c=colors, s=sizes, label=collection.get_label())
 
+    # 复制patches
+    for patch in source_ax.patches:
+        if isinstance(patch, mpatches.Rectangle):
+            new_patch = mpatches.Rectangle(patch.get_xy(), patch.get_width(), patch.get_height(),
+                                  angle=patch.angle, color=patch.get_facecolor(),
+                                  edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
+        elif isinstance(patch, mpatches.Circle):
+            new_patch = mpatches.Circle(patch.center, patch.radius, color=patch.get_facecolor(),
+                               edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
+        elif isinstance(patch, mpatches.Polygon):
+            new_patch = mpatches.Polygon(patch.get_xy(), closed=patch.get_closed(),
+                                color=patch.get_facecolor(), edgecolor=patch.get_edgecolor(),
+                                linewidth=patch.get_linewidth())
+        else:
+            continue  # 如果有不支持的 Patch 类型可以选择跳过
+        target_ax.add_patch(new_patch)
+
     # 复制标题和标签
     target_ax.set_title(source_ax.get_title())
     target_ax.set_xlabel(source_ax.get_xlabel())
@@ -12206,7 +12397,8 @@ def copy_ax_content(source_ax, target_ax):
 
     # 复制图例
     if source_ax.get_legend() is not None:
-        target_ax.legend()
+        handles, labels = source_ax.get_legend_handles_labels()
+        target_ax.legend(handles, labels)
 
     # 复制刻度标签
     target_ax.set_xticks(source_ax.get_xticks())
@@ -12218,10 +12410,9 @@ def copy_ax_content(source_ax, target_ax):
     target_ax.set_xlim(source_ax.get_xlim())
     target_ax.set_ylim(source_ax.get_ylim())
 
-    # 复制网格
-    # target_ax.grid(source_ax._gridOnMajor)
-
-    # 如果有其他内容（比如文本），可以根据需要扩展
+    # 复制文本
+    for text in source_ax.texts:
+        target_ax.text(text.get_position()[0], text.get_position()[1], text.get_text(), fontsize=text.get_fontsize(), color=text.get_color())
 # endregion
 
 
