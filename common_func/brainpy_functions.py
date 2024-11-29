@@ -83,10 +83,11 @@ def brainpy_unit(physical_quantity):
     '''
     if physical_quantity == 'V':
         return 'mV (10^-3 V)'
-    if physical_quantity == 'I':
-        return 'nA (10^-9 A)'
-    if physical_quantity == 'R':
-        return 'MOhm (10^6 Ohm)'
+    # 这两个可能不对
+    # if physical_quantity == 'I':
+    #     return 'nA (10^-9 A)'
+    # if physical_quantity == 'R':
+    #     return 'MOhm (10^6 Ohm)'
     if physical_quantity == 'tau':
         return 'ms (10^-3 s)'
 # endregion
@@ -317,8 +318,32 @@ def raster_plot(ax, dt, spike, color=cf.BLUE, xlabel='time (ms)', ylabel='neuron
     cf.set_ax(ax, xlabel, ylabel, title=title, xlim=xlim, ylim=ylim, **set_ax_kwargs)
 
 
+def fr_scale_raster_plot(ax, dt, spike, fr, cmap=cf.DENSITY_CMAP, xlabel='time (ms)', ylabel='neuron index', title='raster', label=None, xlim=None, ylim=None, scatter_kwargs=None, set_ax_kwargs=None):
+    scatter_kwargs = cf.update_dict({'s': cf.MARKER_SIZE / 2}, scatter_kwargs)
+    set_ax_kwargs = cf.update_dict({'adjust_tick_size': False}, set_ax_kwargs)
+
+    if xlim is None:
+        xlim = [0, spike.shape[0]*dt]
+    if ylim is None:
+        ylim = [0, spike.shape[1]]
+
+    # Get the indices of the spikes
+    spike_timestep, neuron_indices = np.where(spike)
+    
+    # Filter spikes based on xlim
+    valid_indices = (spike_timestep*dt >= xlim[0]) & (spike_timestep*dt <= xlim[1])
+    
+    # Get the color based on firing rate
+    c = fr[spike_timestep[valid_indices]]
+
+    # Only plot valid spikes
+    cf.plt_colorful_scatter(ax, spike_timestep[valid_indices]*dt, neuron_indices[valid_indices], c, cmap=cmap, label=label, scatter_kwargs={'clip_on': False}, **scatter_kwargs)
+
+    cf.set_ax(ax, xlabel, ylabel, title=title, xlim=xlim, ylim=ylim, **set_ax_kwargs)
+
+
 def EI_raster_plot(ax, dt, E_spike, I_spike, E_color=E_COLOR, I_color=I_COLOR, xlabel='time (ms)', ylabel='', title='raster', E_label=None, I_label=None, E_xlim=None, E_ylim=None, I_xlim=None, I_ylim=None, split_ax_kwargs=None, scatter_kwargs=None, set_ax_kwargs=None):
-    split_ax_kwargs = cf.update_dict({'orientation': 'vertical', 'sharex': True, 'pad': cf.SIDE_PAD*3, 'ratio': E_spike.shape[1] / (E_spike.shape[1] + I_spike.shape[1])}, split_ax_kwargs)
+    split_ax_kwargs = cf.update_dict({'nrows': 2, 'sharex': True, 'hspace': cf.SIDE_PAD*3, 'height_ratios': [E_spike.shape[1], I_spike.shape[1]]}, split_ax_kwargs)
     
     ax_E, ax_I = cf.split_ax(ax, **split_ax_kwargs)
     raster_plot(ax_E, dt, E_spike, color=E_color, xlabel='', ylabel='E '+ylabel, title=title, label=E_label, xlim=E_xlim, ylim=E_ylim, scatter_kwargs=scatter_kwargs, set_ax_kwargs=set_ax_kwargs)
@@ -326,6 +351,7 @@ def EI_raster_plot(ax, dt, E_spike, I_spike, E_color=E_COLOR, I_color=I_COLOR, x
 
     cf.rm_ax_spine(ax_E, 'bottom')
     cf.rm_ax_tick(ax_E, 'x')
+    cf.rm_ax_ticklabel(ax_E, 'x')
     cf.align_label([ax_E, ax_I], 'y')
     return ax_E, ax_I
 
@@ -430,20 +456,48 @@ def EI_LFP_plot(ax, E_LFP, I_LFP, dt, E_color=E_COLOR, I_color=I_COLOR, xlabel='
     LFP_plot(ax, I_LFP, dt, color=I_color, xlabel=xlabel, ylabel=ylabel, title=title, label=I_label, line_kwargs=line_kwargs, set_ax_kwargs=set_ax_kwargs)
 
 
-def acf_plot(ax, lag_times, acf, exp_fit=False, color=cf.BLUE, xlabel='lag (ms)', ylabel='ACF', title='ACF', label=None, line_kwargs=None, set_ax_kwargs=None):
-    template_line_plot(ax, lag_times, acf, color=color, xlabel=xlabel, ylabel=ylabel, title=title, label=label, line_kwargs=line_kwargs, set_ax_kwargs=set_ax_kwargs)
+def single_exp(x, amp, tau):
+    return amp * np.exp(-x / tau)
+
+
+def single_exp_fit(lag_times, acf):
+    single_popt, single_pcov, single_error = cf.get_curvefit(lag_times, acf, single_exp)
+    return single_popt, single_pcov, single_error
+
+
+def get_timescale_from_acf(lag_times, acf):
+    single_popt, _, _ = single_exp_fit(lag_times, acf)
+    return single_popt[1]
+
+
+def acf_plot(ax, lag_times, acf, exp_fit=False, color=cf.BLUE, xlabel='lag (ms)', ylabel='ACF', title='ACF', label=None, line_kwargs=None, set_ax_kwargs=None, text_x=0.05, text_y=0.9, text_color=cf.BLACK, fontsize=cf.FONT_SIZE*1.6, show_fit_line=False, before_str='', after_str='', show_tau_in_text=True):
+    '''
+    before str: 在text前面加的字符串
+    show_tau_in_text: 是否在text中显示'tau'
+    '''
+
     if exp_fit:
-        def single_exp(x, amp, tau):
-            return amp * np.exp(-x / tau)
+        # def single_exp(x, amp, tau):
+        #     return amp * np.exp(-x / tau)
         # def double_exp(x, amp1, tau1, amp2, tau2):
         #     return amp1 * np.exp(-x / tau1) - amp2 * np.exp(-x / tau2)
         
-        single_popt, single_pcov, single_error = cf.get_curvefit(lag_times, acf, single_exp)
-        cf.add_text(ax, f'single exp fit: tau={cf.round_float(single_popt[1])} ms, error={cf.round_float(single_error)}', x=0.05, y=0.9)
-
+        # single_popt, single_pcov, single_error = cf.get_curvefit(lag_times, acf, single_exp)
+        single_popt, single_pcov, single_error = single_exp_fit(lag_times, acf)
+        # cf.add_text(ax, f'single exp fit: tau={cf.round_float(single_popt[1])} ms, error={cf.round_float(single_error)}', x=text_x, y=text_y, fontsize=cf.FONT_SIZE*1.6, color=text_color)
+        if show_tau_in_text:
+            cf.add_text(ax, cf.concat_str([before_str, f'tau={cf.round_float(single_popt[1])} ms', after_str]), x=text_x, y=text_y, fontsize=fontsize, color=text_color)
+        else:
+            cf.add_text(ax, cf.concat_str([before_str, f'{cf.round_float(single_popt[1])} ms', after_str]), x=text_x, y=text_y, fontsize=fontsize, color=text_color)
         # double_popt, double_pcov, double_error = cf.get_curvefit(lag_times, acf, double_exp, p0=[single_popt[0],single_popt[1],0.1,0], bounds=(0,np.inf), maxfev=5000)
         
         # cf.add_text(ax, f'double exp fit: tau1={cf.round_float(double_popt[1])} ms, tau2={cf.round_float(double_popt[3])} ms, error={cf.round_float(double_error)}', x=0.05, y=0.7)
+
+        if show_fit_line:
+            fit_line = single_exp(lag_times, *single_popt)
+            cf.plt_line(ax, lag_times, fit_line, color=color, linestyle='--', label='exp fit')
+    template_line_plot(ax, lag_times, acf, color=color, xlabel=xlabel, ylabel=ylabel, title=title, label=label, line_kwargs=line_kwargs, set_ax_kwargs=set_ax_kwargs)
+    if exp_fit:
         return single_popt[1]
 
 
@@ -1110,11 +1164,50 @@ class NMDAMgBlock(bp.Projection):
 
 
 # region 神经元连接
+class IJConn(bp.connect.TwoEndConnector):
+    """
+        Connector built from the ``pre_ids`` and ``post_ids`` connections.
+        Copid from brainpy, but adjust the int32 to uint32
+    """
+    def __init__(self, i, j, **kwargs):
+        super(IJConn, self).__init__(**kwargs)
+
+        assert isinstance(i, (np.ndarray, bm.Array, jnp.ndarray)) and i.ndim == 1
+        assert isinstance(j, (np.ndarray, bm.Array, jnp.ndarray)) and j.ndim == 1
+        assert i.size == j.size
+
+        # initialize the class via "pre_ids" and "post_ids"
+        self.pre_ids = jnp.asarray(i).astype(jnp.uint32)
+        self.post_ids = jnp.asarray(j).astype(jnp.uint32)
+        self.max_pre = self.pre_ids.max()
+        self.max_post = self.post_ids.max()
+
+    def __call__(self, pre_size, post_size):
+        super(IJConn, self).__call__(pre_size, post_size)
+        if self.max_pre >= self.pre_num:
+            raise bp.errors.ConnectorError(f'pre_num ({self.pre_num}) should be greater than '
+                            f'the maximum id ({self.max_pre}) of self.pre_ids.')
+        if self.max_post >= self.post_num:
+            raise bp.errors.ConnectorError(f'post_num ({self.post_num}) should be greater than '
+                            f'the maximum id ({self.max_post}) of self.post_ids.')
+        return self
+
+    def build_coo(self):
+        if self.pre_num <= self.max_pre:
+            raise bp.errors.ConnectorError(f'pre_num ({self.pre_num}) should be greater than '
+                            f'the maximum id ({self.max_pre}) of self.pre_ids.')
+        if self.post_num <= self.max_post:
+            raise bp.errors.ConnectorError(f'post_num ({self.post_num}) should be greater than '
+                            f'the maximum id ({self.max_post}) of self.post_ids.')
+        return self.pre_ids, self.post_ids
+
+
 def ij_conn(pre, post, pre_size, post_size):
     '''
     利用brainpy的bp.conn.IJConn生成conn
     '''
-    conn = bp.conn.IJConn(i=pre, j=post)
+    # conn = bp.conn.IJConn(i=pre, j=post)
+    conn = IJConn(i=pre, j=post)
     conn = conn(pre_size=pre_size, post_size=post_size)
     return conn
 

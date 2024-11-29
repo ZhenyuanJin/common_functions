@@ -2419,6 +2419,26 @@ def split_list(lst, n):
     return divided_list
 
 
+def split_array(arr, axis, n):
+    '''
+    将数组沿指定轴均等地分割为n个子数组。
+    '''
+    # Calculate sizes of chunks
+    total_length = arr.shape[axis]
+    chunk_sizes = [total_length // n + (1 if i < total_length % n else 0) for i in range(n)]
+
+    # Compute slicing indices
+    slices = []
+    start = 0
+    for size in chunk_sizes:
+        stop = start + size
+        slices.append(slice(start, stop))
+        start = stop
+
+    # Split the array using advanced indexing
+    return [arr[(slice(None),) * axis + (s,)] for s in slices]
+
+
 def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name=''):
     '''
     多进程并行处理函数
@@ -2479,6 +2499,7 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name
                 except Exception as e:
                     results.append(None)
                     print(f"An error occurred: {e}")
+        print_title(f"Finish {func_name}")
         return results
     elif process_num == 1:
         return [func(*args, **kwargs) for args, kwargs in zip(args_list, kwargs_list)]
@@ -2649,7 +2670,7 @@ def get_max_decimal_num(number_list, **kwargs):
 
 
 # region 字符串、filename处理相关函数
-def format_text(string, text_process=None):
+def format_text(text, text_process=None):
     '''
     格式化文本(主要是为了画图美观)
     '''
@@ -2659,7 +2680,7 @@ def format_text(string, text_process=None):
     replace_underscore = text_process['replace_underscore']
     ignore_equation_underscore = text_process['ignore_equation_underscore']
 
-    if string is None:
+    if text is None:
         return None
     else:
         # 分割字符串，保留$$之间的内容
@@ -2668,7 +2689,7 @@ def format_text(string, text_process=None):
             # 使用标志位记录是否在$$内
             in_math = False
             temp_str = ""
-            for char in string:
+            for char in text:
                 if char == "$" and not in_math:  # 开始$$
                     in_math = True
                     if temp_str:  # 保存$$之前的内容
@@ -2689,8 +2710,8 @@ def format_text(string, text_process=None):
             if temp_str:  # 添加最后一部分
                 parts.append(temp_str)
         else:
-            parts = [string.replace('_', replace_underscore)
-                     if replace_underscore else string]
+            parts = [text.replace('_', replace_underscore)
+                     if replace_underscore else text]
 
         # 处理大写转换
         if capitalize:
@@ -2848,15 +2869,15 @@ def align_decimal(number, reference_value):
     return aligned_number
 
 
-def format_filename(string, file_process=None):
+def format_filename(filename, file_process=None):
     '''
     格式化文件名(目前是为了去除空格,格式化浮点数的小数点没有加入此函数)
     '''
     file_process = update_dict(FILENAME_PROCESS, file_process)
-    if string is None:
+    if filename is None:
         return None
     else:
-        return string.replace(' ', file_process['replace_blank'])
+        return filename.replace(' ', file_process['replace_blank'])
 
 
 def concat_str(strs, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True):
@@ -5276,15 +5297,19 @@ def get_ccovf(x, y, T=None, sample_rate=None, nlags=None, nan_policy='interpolat
     return time_lags, ccf_values * np.std(x) * np.std(y)
 
 
-def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
+def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
     '''
     处理多个时间序列的自相关函数 (ACF) 并返回结果,multi_timeseries的shape为(time_series_num, time_series_length)
     '''
-    multi_acf = []
-    for timeseries in multi_timeseries:
-        lag_times, acf_values = get_acf(timeseries, T=T, sample_rate=sample_rate, nlags=nlags, fft=fft, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-        multi_acf.append(acf_values)
-    return lag_times, np.array(multi_acf)
+    # multi_acf = []
+    # for timeseries in multi_timeseries:
+    #     lag_times, acf_values = get_acf(timeseries, T=T, sample_rate=sample_rate, nlags=nlags, fft=fft, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    #     multi_acf.append(acf_values)
+    # return lag_times, np.array(multi_acf)
+    r = multi_process_list_for(process_num=process_num, func=get_acf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy}, for_idx_name='timeseries')
+    lag_times = r[0][0]
+    multi_acf = np.array([i[1] for i in r])
+    return lag_times, multi_acf
 
 
 def get_hist(data, bins, stat='probability', nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
@@ -5833,7 +5858,7 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, r
     if not vert:
         x, y = y, x
 
-    if rasterized_threshold is not None or rasterized_threshold is not False:
+    if (rasterized_threshold is not None) and (rasterized_threshold is not False):
         if len(x) > rasterized_threshold:
             rasterized = True
 
@@ -7056,28 +7081,19 @@ def add_side_ax(ax, position='right', relative_size=SIDE_PAD*2, pad=SIDE_PAD, sh
     elif sharey is None or sharey is False:
         sharey = None
 
-    fig = ax.get_figure()
-    pos = ax.get_position()
-
-    # 计算新ax的尺寸和位置
-    if position in ['right', 'left']:
-        size = pos.width * relative_size
-    elif position in ['top', 'bottom']:
-        size = pos.height * relative_size
-
     new_pos = {'left': 0., 'right': 1., 'top': 1., 'bottom': 0.}
     if position == 'right':
         new_pos['left'] = 1. + pad
-        new_pos['right'] = 1. + pad + size
+        new_pos['right'] = 1. + pad + relative_size
     elif position == 'left':
-        new_pos['left'] = -size - pad
-        new_pos['right'] = -pad
+        new_pos['left'] = - relative_size - pad
+        new_pos['right'] = - pad
     elif position == 'top':
-        new_pos['top'] = 1. + pad + size
+        new_pos['top'] = 1. + pad + relative_size
         new_pos['bottom'] = 1. + pad
     elif position == 'bottom':
         new_pos['top'] = - pad
-        new_pos['bottom'] = -size -pad
+        new_pos['bottom'] = - relative_size - pad
 
     # 创建并返回新的ax，可能共享x轴或y轴
     new_ax = inset_ax(ax, left=new_pos['left'], right=new_pos['right'], bottom=new_pos['bottom'], top=new_pos['top'], sharex=sharex, sharey=sharey, label=label, inset_mode=inset_mode, **kwargs)
@@ -8808,7 +8824,7 @@ def add_span(ax, color=GREEN, alpha=FAINT_ALPHA, **kwargs):
 
 
 # region 初级作图函数(创建patch)
-def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, vert=True, cmap=DENSITY_CMAP):
+def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, vert=True, cmap=DENSITY_CMAP, gradient=None, alpha=None, vmin=None, vmax=None):
     '''
     创建一个渐变色的patch。
 
@@ -8820,6 +8836,7 @@ def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, ver
     - auto_scale: 是否自动调整坐标轴范围,默认为True
     - vert: 渐变色的方向,默认为True即垂直方向
     - cmap: 渐变色的颜色映射,默认为DENSITY_CMAP
+    - gradient: 渐变色的数组,默认为None即自动生成
     '''
     if transform == 'data':
         transform = ax.transData
@@ -8828,14 +8845,25 @@ def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, ver
         print('user should create a new axes with the desired position, set the xylim of these new axes and add patch on this new axes by transform=ax.transData')
         print("this may be modified in a new version, with the code like# 创建数据data = np.random.random((10, 10))fig, ax = plt.subplots()# 创建一个 AxesImage 对象image = AxesImage(ax, interpolation='nearest', cmap='viridis')# 将图像数据与对象关联image.set_data(data)# 设置变换为 ax.transAxesimage.set_transform(ax.transAxes)# 设置 extent 为 [0.1, 0.4] 等比例坐标image.set_extent([0.1, 0.4, 0.1, 0.4])# 添加到轴中ax.add_image(image)但是实际使用的时候似乎会改变ax的xylim所以需要之后再看下")
 
-    # 创建渐变数组
-    gradient = np.linspace(0, 1, 256).reshape(1, -1)
-    gradient = np.vstack((gradient, gradient))  # 扩展到2行
+    if gradient is None:
+        # 创建渐变数组
+        gradient = np.linspace(0, 1, 256).reshape(1, -1)
+        gradient = np.vstack((gradient, gradient))  # 扩展到2行
+    elif isinstance(gradient, (list, tuple)):
+        gradient = np.array(gradient).reshape(1, -1)
+        gradient = np.vstack((gradient, gradient))  # 扩展到2行
+    elif isinstance(gradient, np.ndarray):
+        if gradient.ndim == 1:
+            gradient = gradient.reshape(1, -1)
+            gradient = np.vstack((gradient, gradient))  # 扩展到2行
+        elif gradient.ndim == 2:
+            pass
+
     if vert:
         gradient = gradient.T  # 垂直方向上的渐变
 
     # 在 ax 中绘制渐变色
-    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=extent, transform=transform)
+    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=extent, transform=transform, alpha=alpha, vmin=vmin, vmax=vmax)
 
     # 裁剪渐变色
     im.set_clip_path(patch)
