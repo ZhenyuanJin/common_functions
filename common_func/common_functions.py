@@ -5847,13 +5847,13 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, r
     -s是圆的面积,radius按照points的单位
     '''
     # 根据xlim和ylim预处理数据
-    if xlim is not None:
-        x = [xi for xi, yi in zip(x, y) if xlim[0] <= xi <= xlim[1]]
-        y = [yi for xi, yi in zip(x, y) if xlim[0] <= xi <= xlim[1]]
-        
-    if ylim is not None:
-        x = [xi for xi, yi in zip(x, y) if ylim[0] <= yi <= ylim[1]]
-        y = [yi for xi, yi in zip(x, y) if ylim[0] <= yi <= ylim[1]]
+    if xlim or ylim:
+        filtered_data = [
+            (xi, yi) for xi, yi in zip(x, y)
+            if (xlim is None or xlim[0] <= xi <= xlim[1]) and 
+               (ylim is None or ylim[0] <= yi <= ylim[1])
+        ]
+        x, y = zip(*filtered_data) if filtered_data else ([], [])
 
     if not vert:
         x, y = y, x
@@ -5888,13 +5888,13 @@ def plt_line(ax, x, y, label=None, color=BLUE, vert=True, xlim=None, ylim=None, 
     :param kwargs: 其他plt.plot支持的参数
     '''
     # 根据xlim和ylim预处理数据
-    if xlim is not None:
-        x = [xi for xi, yi in zip(x, y) if xlim[0] <= xi <= xlim[1]]
-        y = [yi for xi, yi in zip(x, y) if xlim[0] <= xi <= xlim[1]]
-        
-    if ylim is not None:
-        x = [xi for xi, yi in zip(x, y) if ylim[0] <= yi <= ylim[1]]
-        y = [yi for xi, yi in zip(x, y) if ylim[0] <= yi <= ylim[1]]
+    if xlim or ylim:
+        filtered_data = [
+            (xi, yi) for xi, yi in zip(x, y)
+            if (xlim is None or xlim[0] <= xi <= xlim[1]) and 
+               (ylim is None or ylim[0] <= yi <= ylim[1])
+        ]
+        x, y = zip(*filtered_data) if filtered_data else ([], [])
     
     # 画图
     if not vert:
@@ -8824,7 +8824,7 @@ def add_span(ax, color=GREEN, alpha=FAINT_ALPHA, **kwargs):
 
 
 # region 初级作图函数(创建patch)
-def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, vert=True, cmap=DENSITY_CMAP, gradient=None, alpha=None, vmin=None, vmax=None):
+def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, vert=True, cmap=DENSITY_CMAP, gradient=None, alpha=None, vmin=None, vmax=None, imshow_kwargs=None):
     '''
     创建一个渐变色的patch。
 
@@ -8838,6 +8838,7 @@ def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, ver
     - cmap: 渐变色的颜色映射,默认为DENSITY_CMAP
     - gradient: 渐变色的数组,默认为None即自动生成
     '''
+    imshow_kwargs = update_dict({}, imshow_kwargs)
     if transform == 'data':
         transform = ax.transData
     elif transform == 'axes':
@@ -8863,7 +8864,7 @@ def add_gradient_patch(ax, patch, extent, transform='data', auto_scale=True, ver
         gradient = gradient.T  # 垂直方向上的渐变
 
     # 在 ax 中绘制渐变色
-    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=extent, transform=transform, alpha=alpha, vmin=vmin, vmax=vmax)
+    im = ax.imshow(gradient, aspect='auto', cmap=cmap, extent=extent, transform=transform, alpha=alpha, vmin=vmin, vmax=vmax, **imshow_kwargs)
 
     # 裁剪渐变色
     im.set_clip_path(patch)
@@ -12807,6 +12808,19 @@ def copy_ax_content(source_ax, target_ax):
         else:
             continue  # 如果有不支持的 Patch 类型可以选择跳过
         target_ax.add_patch(new_patch)
+
+    # 复制 imshow 图像
+    for img in source_ax.images:
+        target_ax.imshow(
+            img.get_array(),
+            extent=img.get_extent(),
+            origin=img.origin,
+            cmap=img.get_cmap(),
+            norm=img.norm,
+            interpolation=img.get_interpolation(),
+            alpha=img.get_alpha(),
+            aspect='auto',
+        )
 
     # 复制标题和标签
     target_ax.set_title(source_ax.get_title())
