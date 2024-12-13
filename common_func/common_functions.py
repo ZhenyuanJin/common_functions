@@ -530,6 +530,7 @@ def common_mistake():
     '''常见错误'''
     # 变量直接赋值导致的同时修改
     # == 与 = 的混淆
+    # zip(a, b)的多次使用,导致zip对象被消耗,第二次使用时为空,可以使用转换为list或者tuple来解决(见函数get_reusable_zip)
     # to be continued
     pass
 
@@ -1704,6 +1705,24 @@ def find_fig(filename, order=None):
 # endregion
 
 
+# region 循环相关函数
+def get_reusable_zip(*iterables):
+    '''
+    用于将多个可迭代对象压缩成一个列表的函数,并且当输入的可迭代对象长度不一致时,提示
+    '''
+    # Convert all iterables to lists to check lengths
+    iterables = [list(it) for it in iterables]
+    
+    # Check if all iterables have the same length
+    lengths = [len(it) for it in iterables]
+    if len(set(lengths)) > 1:
+        print("Warning: Iterables have different lengths. Zip will truncate to the shortest length.")
+    
+    # Return a list of tuples
+    return list(zip(*iterables))
+# endregion
+
+
 # region 保存和加载相关函数
 def save_code_copy(destination_folder, code_name):
     '''
@@ -2532,6 +2551,11 @@ def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=N
     if kwargs is None:
         kwargs = {}
     for_list = list(for_list)   # 防止for_list是生成器,比如range(10)
+
+    if process_num > len(for_list):
+        print_title(f'Reduce process_num from {process_num} to {len(for_list)} as process_num > len(for_list)')
+        process_num = len(for_list)
+
     divided_list = split_list(for_list, process_num)
     args_list = [(func, divided, for_idx_name)+args for divided in divided_list]
     kwargs_list = [kwargs] * process_num
@@ -2563,6 +2587,11 @@ def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_l
         args = ()
     if kwargs is None:
         kwargs = {}
+    
+    if process_num > len(for_list):
+        print_title(f'Reduce process_num from {process_num} to {len(for_list)} as process_num > len(for_list)')
+        process_num = len(for_list)
+
     divided_idx_list = split_list(range(len(for_list)), process_num)
     divided_list = split_list(for_list, process_num)
     args_list = [(func, divided_idx, divided, for_idx_name, for_item_name)+args for divided_idx, divided in zip(divided_idx_list, divided_list)]
@@ -2602,6 +2631,11 @@ def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=
         args = ()
     if kwargs is None:
         kwargs = {}
+    
+    if process_num > len(for_dict):
+        print_title(f'Reduce process_num from {process_num} to {len(for_dict)} as process_num > len(for_dict)')
+        process_num = len(for_dict)
+    
     divided_key_list = split_list(list(for_dict.keys()), process_num)
     divided_value_list = split_list(list(for_dict.values()), process_num)
     args_list = [(func, divided_key, divided_value, for_key_name, for_value_name)+args for divided_key, divided_value in zip(divided_key_list, divided_value_list)]
@@ -2730,6 +2764,26 @@ def uppercase_text(text):
     return text.upper()
 
 
+def sci_str_to_latex(sci_str):
+    '''
+    将科学计数法字符串转换为LaTeX字符串
+
+    例子:
+    sci_str_to_latex('1.23e-4')  # 返回 '$1.23 \\times 10^{-4}$'
+
+    注意:
+    此函数与sci_float_to_latex不同,不仅在于输入的不同(一个字符串一个浮点数),还在于内部的处理方式不同(此函数假定了浮点数已经被python原生的round scientific notation表示并以10为底,而sci_float_to_latex手动实现了这个过程,可以以其他数为底)
+    '''
+    match = re.match(r"([+-]?\d*\.\d+)e([+-]?\d+)", sci_str)
+    if match:
+        base, exponent = match.groups()
+        # Format the LaTeX string
+        latex_str = f"${base} \\times 10^{{{exponent}}}$"
+        return latex_str
+    else:
+        raise ValueError('The input string is not in scientific notation.')
+
+
 def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
     '''
     Rounds a float to a given number of digits and returns it in specified format.
@@ -2743,11 +2797,15 @@ def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
     - str, the rounded number as a string in the specified format.
     '''
     if format_type == 'general':
-        return f"{number:.{digits}g}"
+        result = f"{number:.{digits}g}"
+        if 'e' in result:
+            return round_float(number, digits=digits, format_type='scientific')
+        else:
+            return result
     elif format_type == 'standard':
         return f"{number:.{digits}f}"
     elif format_type == 'scientific':
-        return f"{number:.{digits}e}"
+        return sci_str_to_latex(f"{number:.{digits}e}")
     elif format_type == 'percent':
         return f"{number:.{digits}%}"
 
@@ -2765,6 +2823,30 @@ def rnd(number, **kwargs):
     round_float_auto的简写
     '''
     return round_float_auto(number, **kwargs)
+
+
+def sci_float_to_latex(number, base=10, base_str='10', round_digits=0):
+    '''
+    假设是coefficient乘以base^exp的形式,返回科学计数法的latex字符串
+
+    注意:
+    默认状态下,假设了number的形式,并非通用,只适用于整数乘以base^exp的形式,一般来说,是用在ticks的标签上
+    当然,也可以用在其他地方,只要符合coefficient乘以base^exp的形式(但是这时需要调整round_digits)
+    '''
+    if number == 0:
+        return r"$0$"  # 0 doesn't have an exponential form
+
+    exp = int(np.floor(np.log(abs(number)) / np.log(base)))
+    coefficient = number / (base ** exp)
+
+    # 当在整数模式下使用,良好的处理整数1和-1
+    if np.allclose(round_digits, 0):
+        if np.allclose(coefficient, 1):
+            return fr"${base_str}^{{{exp}}}$"
+        elif np.allclose(coefficient, -1):
+            return fr"$-{base_str}^{{{exp}}}$"
+    # 当在小数模式下使用,不处理整数1和-1,直接返回
+    return fr"${coefficient:.{round_digits}f} \times {base_str}^{{{exp}}}$"
 
 
 def format_float(number, replace_dot=REPLACE_DOT, **kwargs):
@@ -3866,6 +3948,74 @@ def get_class_name(cls):
 
 def is_class(obj):
     return inspect.isclass(obj)
+# endregion
+
+
+# region 排序
+def sort_array(arr, ascending=True, nan_policy='warn'):
+    """
+    对数组或列表进行排序,如果包含 NaN 则发出警告。
+    
+    参数:
+        arr (list or array-like):要排序的输入数据
+        ascending (bool):如果为 True,按从小到大排序,否则按从大到小排序
+        nan_policy (str): 可选'warn', 'raise', 'propagate'之一,默认为'warn'; 'warn'表示在数据中存在NaN时发出警告,'raise'表示在数据中存在NaN时引发异常,'propagate'表示不处理NaN
+    
+    返回:
+        sorted_array (list or ndarray): 排序后的结果，保持输入类型。
+    """
+    is_list = isinstance(arr, list)
+    arr = np.asarray(arr)
+    
+    if np.isnan(arr).any():
+        if nan_policy == 'warn':
+            print("Warning: NaN values are present in the input data.")
+        elif nan_policy == 'raise':
+            raise ValueError("NaN values are present in the input data.")
+        elif nan_policy == 'propagate':
+            pass
+    
+    if ascending:
+        sorted_arr = np.sort(arr)
+    else:
+        sorted_arr = np.sort(arr)[::-1]
+    
+    return sorted_arr.tolist() if is_list else sorted_arr
+
+
+def argsort_array(arr, ascending=True, nan_policy='warn'):
+    """
+    对数组或列表返回排序后的索引,如果包含 NaN 则根据 nan_policy 参数处理
+    
+    参数:
+        arr (list or array-like): 要排序的输入数据
+        ascending (bool): 如果为 True,按从小到大排序;否则按从大到小排序
+        nan_policy (str): 可选 'warn', 'raise', 'propagate' 之一,默认为 'warn'
+                         'warn' 表示在数据中存在 NaN 时发出警告
+                         'raise' 表示在数据中存在 NaN 时引发异常
+                         'propagate' 表示不处理 NaN
+    
+    返回:
+        indices (ndarray): 排序后的索引
+    """
+    arr = np.asarray(arr)
+    
+    # 检查 NaN 并处理
+    if np.isnan(arr).any():
+        if nan_policy == 'warn':
+            print("Warning: NaN values are present in the input data.")
+        elif nan_policy == 'raise':
+            raise ValueError("NaN values are present in the input data.")
+        elif nan_policy == 'propagate':
+            pass
+
+    # 根据升序或降序返回排序索引
+    if ascending:
+        indices = np.argsort(arr)
+    else:
+        indices = np.argsort(arr)[::-1]
+    
+    return indices
 # endregion
 
 
@@ -5829,7 +5979,7 @@ def unsqueeze_ax(ax, ncols=1, nrows=1):
 
 
 # region 初级作图函数(matplotlib系列,输入向量使用)
-def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, rasterized_threshold=10000, xlim=None, ylim=None, **kwargs):
+def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, rasterized_threshold=10000, xlim=None, ylim=None, linewidths=0., **kwargs):
     '''
     使用x和y绘制散点图,可以接受plt.scatter的其他参数
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -5840,6 +5990,9 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, r
     :param vert: 是否为垂直散点图,默认为True,即纵向
     :param rasterized: 是否对图像进行栅格化处理,默认为False(如果点数特别多,导致图像过大时,可以考虑开启)
     :param rasterized_threshold: 栅格化处理的阈值,默认为10000,当点数超过这个值时,会进行栅格化处理(如果不需要这个自动处理,可以设置为None或者False)
+    :param xlim: x轴的范围,默认为None (用于仅仅绘画xlim范围内的点,而不是设定x轴范围)
+    :param ylim: y轴的范围,默认为None
+    :param linewidths: 线宽,默认为0. (防止点的s值小于linewidths时,出现空心点的情况)
     :param kwargs: 其他plt.scatter支持的参数
 
     注意
@@ -5869,9 +6022,9 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, r
         if len(list_shape(local_kwargs['c'])) == 1:
             local_kwargs['c'] = [local_kwargs['c']]
         # 不输入color参数
-        return ax.scatter(x, y, label=label, rasterized=rasterized, **local_kwargs)
+        return ax.scatter(x, y, label=label, rasterized=rasterized, linewidths=linewidths, **local_kwargs)
     else:
-        return ax.scatter(x, y, label=label, rasterized=rasterized, color=color, **kwargs)
+        return ax.scatter(x, y, label=label, rasterized=rasterized, color=color, linewidths=linewidths, **kwargs)
 
 
 def plt_line(ax, x, y, label=None, color=BLUE, vert=True, xlim=None, ylim=None, **kwargs):
@@ -5883,7 +6036,7 @@ def plt_line(ax, x, y, label=None, color=BLUE, vert=True, xlim=None, ylim=None, 
     :param label: 图例标签,默认为None
     :param color: 折线图的颜色,默认为BLUE
     :param vert: 是否为垂直折线图,默认为True,即纵向
-    :param xlim: x轴的范围,默认为None
+    :param xlim: x轴的范围,默认为None (用于仅仅绘画xlim范围内的点,而不是设定x轴范围)
     :param ylim: y轴的范围,默认为None
     :param kwargs: 其他plt.plot支持的参数
     '''
@@ -9614,7 +9767,7 @@ def plt_group_box(ax, x, y, label_list, width=None, colors=CMAP, vert=True, **kw
         ax.set_yticklabels(x)
 
 
-def plt_linregress(ax, x, y, xlog=False, ylog=False, xlog_base=10, ylog_base=10, xlog_base_str=None, ylog_base_str=None, linear_but_log=False, label=None, scatter_color=BLUE, line_color=RED, line_bound='data', show_list=None, round_digit_list=None, round_format_list=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True, scatter_mode='original'):
+def plt_linregress(ax, x, y, xlog=False, ylog=False, xlog_base=10, ylog_base=10, xlog_base_str=None, ylog_base_str=None, linear_but_log=False, label=None, scatter_color=BLUE, line_color=RED, line_bound='data', show_list=None, round_digit_dict=None, round_format_dict=None, text_size=FONT_SIZE, scatter_kwargs=None, line_kwargs=None, text_kwargs=None, regress_kwargs=None, show_scatter=True, scatter_mode='original'):
     '''
     使用线性回归结果绘制散点图和回归线,可以输入scatter的其他参数
 
@@ -9649,10 +9802,6 @@ def plt_linregress(ax, x, y, xlog=False, ylog=False, xlog_base=10, ylog_base=10,
         text_kwargs = {}
     if show_list is None:
         show_list = ['r', 'p']
-    if round_digit_list is None:
-        round_digit_list = [ROUND_DIGITS] * len(show_list)
-    if round_format_list is None:
-        round_format_list = ['general'] * len(show_list)
 
     x = np.array(x)
     y = np.array(y)
@@ -9736,8 +9885,7 @@ def plt_linregress(ax, x, y, xlog=False, ylog=False, xlog_base=10, ylog_base=10,
                 y_min, y_max = y_local_min, y_local_max
             plt_line(ax, [x_min, x_max], [y_min, y_max], color=line_color, **line_kwargs)
 
-        add_linregress_text(ax, regress_dict, show_list=show_list,
-                            round_digit_list=round_digit_list, round_format_list=round_format_list, fontsize=text_size, **text_kwargs)
+        add_text_by_dict(ax, text_dict=regress_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=text_size, **text_kwargs)
         return regress_dict
 
 
@@ -10017,7 +10165,7 @@ def plt_cdf(ax, data, label=None, color=BLUE, vert=True, **kwargs):
     return plt_line(ax, cdf.x, cdf.y, label=label, color=color, vert=vert, **kwargs)
 
 
-def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, color2=RED, vert=True, text_x=TEXT_X, text_y=TEXT_Y, round_digit_list=None, round_format_list=None, show_list=None, text_kwargs=None, cdf_kwargs=None):
+def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, color2=RED, vert=True, text_x=TEXT_X, text_y=TEXT_Y, fontsize=FONT_SIZE, round_digit_dict=None, round_format_dict=None, show_list=None, text_kwargs=None, cdf_kwargs=None):
     '''
     使用两组数据绘制累积分布函数图,并计算K-S检验的p值
     :param ax: matplotlib的轴对象,用于绘制图形
@@ -10029,14 +10177,6 @@ def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, 
     :param color2: 第二组数据的颜色
     :param kwargs: 传递给plt_cdf的额外关键字参数
     '''
-    if show_list is None:
-        show_list = ['KS', 'P']
-    if round_digit_list is None:
-        round_digit_list = [ROUND_DIGITS] * len(show_list)
-    if round_format_list is None:
-        round_format_list = ['general'] * len(show_list)
-    if text_kwargs is None:
-        text_kwargs = {}
     if cdf_kwargs is None:
         cdf_kwargs = {}
 
@@ -10044,14 +10184,8 @@ def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, 
     plt_cdf(ax, data2, label=label2, color=color2, vert=vert, **cdf_kwargs)
 
     ks, p = get_ks_and_p(data1, data2)
-    text = []
-    for show, round_digit, round_format in zip(show_list, round_digit_list, round_format_list):
-        if show == 'KS':
-            text.append(f'KS: {round_float(ks, round_digit, round_format)}')
-        if show == 'P':
-            text.append(f'P: {round_float(p, round_digit, round_format)}')
-    text = '\n'.join(text)
-    add_text(ax, text, x=text_x, y=text_y, **text_kwargs)
+    text_dict = {'KS': ks, 'P': p}
+    add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
 
 
 def plt_marginal_hist_2d(ax, x, y, x_side_ax=None, y_side_ax=None, stat='probability', cbar_label=None, hist_kwargs=None, marginal_kwargs=None):
@@ -10209,6 +10343,87 @@ def plt_polygon_heatmap(ax, xy_dict, value_dict, mask=None, mask_color=MASK_COLO
         if vmax < np.nanmax(list(value_dict.values())):
             cbar_kwargs['add_geq'] = True
         return add_side_colorbar(ax, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, cbar_label=cbar_label, cbar_position=cbar_position, use_mask=use_mask, mask_color=mask_color, **cbar_kwargs)
+
+
+def plt_qq_plot(ax, data_x, data_y, n_quantiles=None, scatter_color=BLUE, line_color=RED, scatter_kwargs=None, line_kwargs=None, text_x=TEXT_X, text_y=TEXT_Y, show_list=None, round_digit_dict=None, round_format_dict=None, fontsize=FONT_SIZE, text_kwargs=None):
+    """
+    绘制QQ图
+    :param ax: matplotlib的轴对象
+    :param data_x: 数据集x
+    :param data_y: 数据集y
+    :param n_quantiles: 分位数的数量,如果为None,则根据较小的数据集长度自动确定
+    """
+    # 如果未指定分位数数量,则取两个数据集中较小的长度
+    if n_quantiles is None:
+        n_quantiles = min(len(data_x), len(data_y))
+
+    # 计算分位数级别
+    quantile_levels = np.linspace(0., 1., n_quantiles)
+
+    # 计算两组数据在这些分位数级别上的值
+    quantiles_x = np.quantile(data_x, quantile_levels)
+    quantiles_y = np.quantile(data_y, quantile_levels)
+
+    # 绘制QQ图
+    if scatter_kwargs is None:
+        scatter_kwargs = {}
+    if line_kwargs is None:
+        line_kwargs = {}
+    plt_scatter(ax, quantiles_x, quantiles_y, color=scatter_color, **scatter_kwargs)
+    plt_line(ax, [quantiles_x.min(), quantiles_x.max()], [quantiles_y.min(), quantiles_y.max()], color=line_color, **line_kwargs)
+
+    # 添加ks检验的结果
+    ks, p = get_ks_and_p(data_x, data_y)
+    text_dict = {'KS': ks, 'P': p}
+    add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
+
+    # 添加标题
+    ax.set_title('QQ Plot')
+
+
+def plt_pp_plot(ax, data_x, data_y, n_points=None, scatter_color=BLUE, line_color=RED, scatter_kwargs=None, line_kwargs=None, text_x=TEXT_X, text_y=TEXT_Y, show_list=None, round_digit_dict=None, round_format_dict=None, fontsize=FONT_SIZE, text_kwargs=None):
+    """
+    绘制PP图
+    :param ax: matplotlib的轴对象
+    :param data_x: 数据集x
+    :param data_y: 数据集y
+    :param n_points: 用于绘制CDF的点的数量,如果为None,则根据较小的数据集长度自动确定
+    """
+    # 如果未指定点的数量,根据数据集中较小的长度自动确定
+    if n_points is None:
+        n_points = min(len(data_x), len(data_y))
+
+    # 对数据进行排序
+    sorted_data_x = np.sort(data_x)
+    sorted_data_y = np.sort(data_y)
+
+    # 计算累计概率级别
+    cdf_levels = np.linspace(0., 1., n_points)
+
+    # 根据累积概率级别计算CDF的值
+    cdf_x = np.interp(cdf_levels, np.linspace(0., 1., len(sorted_data_x)), sorted_data_x)
+    cdf_y = np.interp(cdf_levels, np.linspace(0., 1., len(sorted_data_y)), sorted_data_y)
+
+    # 绘制PP图
+    if scatter_kwargs is None:
+        scatter_kwargs = {}
+    if line_kwargs is None:
+        line_kwargs = {}
+    
+    # 绘制散点图
+    plt_scatter(ax, cdf_x, cdf_y, color=scatter_color, **scatter_kwargs)
+    
+    # 绘制对角线,表示完美匹配的情况
+    min_max_range = [min(sorted_data_x.min(), sorted_data_y.min()), max(sorted_data_x.max(), sorted_data_y.max())]
+    plt_line(ax, min_max_range, min_max_range, color=line_color, **line_kwargs)
+
+    # 添加ks检验的结果
+    ks, p = get_ks_and_p(data_x, data_y)
+    text_dict = {'KS': ks, 'P': p}
+    add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
+
+    # 添加标题
+    ax.set_title('PP Plot')
 
 
 def plt_advance_quiver(ax):
@@ -10921,42 +11136,57 @@ def add_vline_extreme_value(ax, x, y, extreme_type, label=None, color=None, line
 
 
 # region 复杂作图函数(添加文字)
-def add_linregress_text(ax, regress_dict, show_list=None, round_digit_list=None, round_format_list=None, fontsize=FONT_SIZE, text_process=None, text_kwargs=None):
+def add_text_by_dict(ax, text_dict, show_list=None, round_digit_dict=None, round_format_dict=None, unit_dict=None, unit_mode='()', color_dict=None, fontsize=FONT_SIZE, text_x=TEXT_X, text_y=TEXT_Y, text_process=None, text_kwargs=None):
     '''
-    Displays the results of linear regression on a plot.
+    利用dict的key和value添加文字(每个key一行)
+    
+    参数:
+    - ax: matplotlib的轴对象,用于绘制图形
+    - text_dict: dict, 文字的dict
+    - show_list: list, 需要显示的key的列表
+    - round_digit_dict: dict, 每个key对应的小数位数
+    - round_format_dict: dict, 每个key对应的小数格式
+    - unit_dict: dict, 每个key对应的单位
+    - fontsize: 字体大小
+    - text_x: 文字的x坐标(默认为TEXT_X)
+    - text_y: 文字的y坐标(默认为TEXT_Y)
+    - text_process: dict, 文字处理的dict
+    - text_kwargs: dict, 文字的其他参数
 
-    :param ax: Matplotlib axis object to draw the graph
-    :param regress_dict: dict, results of the linear regression
-    :param show_list: list, names of the results to display
-    :param round_digit_list: list, number of decimal places to round the results
-    :param round_format_list: list, format of the rounded results
-    :param fontsize: int, font size for the displayed results
+    注意:
+    - show_list为None时,默认显示所有的key,如果想要什么也不显示,可以传入空列表[],(但是这样的话也没有必要运行此函数)
     '''
     if show_list is None:
-        show_list = ['r', 'p']
-    if round_digit_list is None:
-        round_digit_list = [ROUND_DIGITS, ROUND_DIGITS]
-    if round_format_list is None:
-        round_format_list = ['general', 'general']
+        show_list = list(text_dict.keys())
+    if round_digit_dict is None:
+        round_digit_dict = {key: ROUND_DIGITS for key in show_list}
+    if round_format_dict is None:
+        round_format_dict = {key: 'general' for key in show_list}
+    if unit_dict is None:
+        unit_dict = {key: None for key in show_list}
+    if color_dict is None:
+        color_dict = {key: BLACK for key in show_list}
     text_process = update_dict(TEXT_PROCESS, text_process)
     if text_kwargs is None:
         text_kwargs = {}
-
-    text_str = ''
-    for i, key in enumerate(show_list):
-        if key in regress_dict:
-            # Format the key name
+    
+    y_offset = 0.
+    for key in show_list:
+        if key in text_dict:
+            # 格式化key
             local_key = format_text(key, text_process=text_process)
-            value = regress_dict[key]
+            value = text_dict[key]
 
-            # Round the value
-            round_value = round_float(
-                value, round_digit_list[i], round_format_list[i])
-            text_str += f'{local_key}: {round_value}\n'
-
-    # Display the linear regression results string
-    if text_str:
-        add_text(ax, text_str, fontsize=fontsize, **text_kwargs)
+            round_value = round_float(value, round_digit_dict[key], round_format_dict[key])
+            if unit_dict[key] is not None:
+                if unit_mode == '()':
+                    round_value = f'{round_value} ({unit_dict[key]})'
+                elif unit_mode == '[]':
+                    round_value = f'{round_value} [{unit_dict[key]}]'
+                else:
+                    round_value = f'{round_value} {unit_dict[key]}'
+            add_text(ax, f'{local_key}: {round_value}', x=text_x, y=text_y - y_offset, fontsize=fontsize, color=color_dict[key], **text_kwargs)
+            y_offset += point_to_ax_proportion(ax, fontsize, axis='y')
 # endregion
 
 
@@ -10985,7 +11215,7 @@ def get_suitable_s(ax, num):
     根据ax的大小和num的数量,返回合适的s值,实际使用时,可以先使用这个值,然后再根据实际情况在此基础上进行调整
 
     注意:
-    s指的是面积,并且是以点的平方为单位的
+    s指的是面积,并且是以点(points)的平方为单位的
     '''
     ax_width, ax_height = get_ax_size(ax)
     ax_width_point = inch_to_point(ax_width)
@@ -11192,12 +11422,55 @@ def show_zorder(ax, include_axes=False, font_size=FONT_SIZE, color=RED, alpha=FA
 # endregion
 
 
-# region 通用函数(inch和point单位转换)
+# region 通用函数(inch,point,ax_proportion单位转换)
 def inch_to_point(inch):
     '''
     将plt中使用的inch单位转换为points单位
     '''
     return inch * 72
+
+
+def point_to_inch(point):
+    '''
+    将plt中使用的points单位转换为inch单位
+    '''
+    return point / 72
+
+
+def ax_proportion_to_inch(ax, proportion, axis='x'):
+    '''
+    将ax的比例转换为inch单位
+    '''
+    ax_width, ax_height = get_ax_size(ax)
+    if axis == 'x':
+        return ax_width * proportion
+    elif axis == 'y':
+        return ax_height * proportion
+
+
+def inch_to_ax_proportion(ax, inch, axis='x'):
+    '''
+    将inch单位转换为ax的比例
+    '''
+    ax_width, ax_height = get_ax_size(ax)
+    if axis == 'x':
+        return inch / ax_width
+    elif axis == 'y':
+        return inch / ax_height
+
+
+def ax_proportion_to_point(ax, proportion, axis='x'):
+    '''
+    将ax的比例转换为points单位
+    '''
+    return inch_to_point(ax_proportion_to_inch(ax, proportion, axis))
+
+
+def point_to_ax_proportion(ax, point, axis='x'):
+    '''
+    将points单位转换为ax的比例
+    '''
+    return inch_to_ax_proportion(ax, point_to_inch(point), axis)
 # endregion
 
 
@@ -11341,13 +11614,14 @@ def add_sep_tick(ax, axis, ticks, length=TICK_MAJOR_SIZE*4, width=TICK_MAJOR_WID
         sec.spines['left'].set_visible(False)
 
 @iterate_over_axs
-def rm_ax_tick(ax, axis=None):
+def rm_ax_tick(ax, axis=None, which='both'):
     '''
     移除轴的刻度。
 
     参数:
     - ax: matplotlib的Axes对象
     - axis: 要移除的轴
+    - which: 要移除的刻度, 可选 'both', 'major', 'minor'
 
     注意:
     - ax.set_xticks([])和ax.set_yticks([])可以移除刻度, 但是这样会在sharex和sharey的情况下移除其他轴的刻度
@@ -11357,18 +11631,19 @@ def rm_ax_tick(ax, axis=None):
 
     for tick in axis:
         if tick == 'x':
-            ax.xaxis.set_tick_params(width=0)
+            ax.xaxis.set_tick_params(width=0, which=which)
         elif tick == 'y':
-            ax.yaxis.set_tick_params(width=0)
+            ax.yaxis.set_tick_params(width=0, which=which)
 
 @iterate_over_axs
-def rm_ax_ticklabel(ax, axis=None):
+def rm_ax_ticklabel(ax, axis=None, which='both'):
     '''
     移除轴的刻度。
 
     参数:
     - ax: matplotlib的Axes对象
     - axis: 要移除的轴
+    - which: 要移除的刻度, 可选 'both', 'major', 'minor'
 
     注意:
     - ax.set_xticklabels([])和ax.set_yticklabels([])会对所有sharex和sharey的轴生效, 所以不推荐使用
@@ -11378,9 +11653,35 @@ def rm_ax_ticklabel(ax, axis=None):
 
     for tick in axis:
         if tick == 'x':
-            ax.tick_params(axis='x', which='both', labelbottom=False)
+            ax.tick_params(axis='x', which=which, labelbottom=False)
         elif tick == 'y':
-            ax.tick_params(axis='y', which='both', labelleft=False)
+            ax.tick_params(axis='y', which=which, labelleft=False)
+
+@iterate_over_axs
+def set_ax_tick(ax, ticks, labels, axis, which='major'):
+    '''
+    设置轴的刻度。
+    
+    参数:
+    - ax: matplotlib的Axes对象
+    - ticks: 刻度的位置
+    - labels: 刻度的标签
+    - axis: 要设置刻度的轴, 可选 'x', 'y', 'z'
+
+    注意:
+    - 一般来说,major的情形就够用了,需要设置minor的情形可能是log刻度下想要减少刻度的数量
+    - 也可以直接使用set_ax函数来设置刻度,它更加自动化,还可以调整ticklabel的fontsize等,但这个函数更加轻量级
+    '''
+    if which == 'major':
+        minor = False
+    elif which == 'minor':
+        minor = True
+    if axis == 'x':
+        ax.set_xticks(ticks, labels=labels, minor=minor)
+    elif axis == 'y':
+        ax.set_yticks(ticks, labels=labels, minor=minor)
+    elif axis == 'z':
+        ax.set_zticks(ticks, labels=labels, minor=minor)
 
 
 def set_cbar_tick(cbar, norm_mode='linear', ticks=None):
@@ -11941,11 +12242,14 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 
     # 设置tick
     if xtick is not None:
-        ax.set_xticks(xtick, labels=xtick_label)
+        # ax.set_xticks(xtick, labels=xtick_label)
+        set_ax_tick(ax, ticks=xtick, labels=xtick_label, axis='x')
     if ytick is not None:
-        ax.set_yticks(ytick, labels=ytick_label)
+        # ax.set_yticks(ytick, labels=ytick_label)
+        set_ax_tick(ax, ticks=ytick, labels=ytick_label, axis='y')
     if is_3d and ztick is not None:
-        ax.set_zticks(ztick, labels=ztick_label)
+        # ax.set_zticks(ztick, labels=ztick_label)
+        set_ax_tick(ax, ticks=ztick, labels=ztick_label, axis='z')
 
     # 设置字体
     if xtick_size is None:
