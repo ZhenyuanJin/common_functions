@@ -26,6 +26,9 @@ import copy
 import hashlib
 import json
 import logging
+from cProfile import Profile
+from pstats import Stats
+import tracemalloc
 
 
 # 数学和科学计算库
@@ -77,6 +80,7 @@ YELLOW = (0.99, 0.70, 0.01)
 BLACK = (0.01, 0.01, 0.01)
 WHITE = (1.00, 1.00, 1.00)
 GRAY = (0.50, 0.50, 0.50)
+GREY = (0.50, 0.50, 0.50)
 ORANGE = (1.00, 0.50, 0.01)
 PURPLE = (0.50, 0.01, 0.50)
 BROWN = (0.50, 0.16, 0.16)
@@ -417,6 +421,73 @@ def estimate_array_memory(shape, data_type='float64', unit='gb'):
 # endregion
 
 
+# region 内存管理
+class MemoryTracker:
+    def __init__(self, stack_depth=10):
+        """
+        初始化 MemoryDebugger 类
+        :param stack_depth: 堆栈追踪深度，默认为 10
+        """
+        self.stack_depth = stack_depth
+        self.snapshot_before = None
+        self.snapshot_after = None
+
+    def start(self):
+        """
+        开始内存追踪
+        """
+        tracemalloc.start(self.stack_depth)
+        self.snapshot_before = tracemalloc.take_snapshot()
+
+    def stop(self):
+        """
+        停止内存追踪并记录第二个快照
+        """
+        self.snapshot_after = tracemalloc.take_snapshot()
+
+    def compare_by_lineno(self, top_n=10):
+        """
+        按行号统计内存差异
+        :param top_n: 显示内存占用最多的前 N 个结果
+        :return: 打印统计信息
+        """
+        if not self.snapshot_before or not self.snapshot_after:
+            print("Error: Please ensure both snapshots are taken (call start() and stop()).")
+            return
+
+        stats = self.snapshot_after.compare_to(self.snapshot_before, 'lineno')
+        print(f"\nTop {top_n} memory usage by line number:\n")
+        for stat in stats[:top_n]:
+            print(stat)
+
+    def compare_by_traceback(self, top_n=1):
+        """
+        按堆栈追踪统计内存差异
+        :param top_n: 显示内存占用最多的前 N 个结果
+        :return: 打印堆栈信息
+        """
+        if not self.snapshot_before or not self.snapshot_after:
+            print("Error: Please ensure both snapshots are taken (call start() and stop()).")
+            return
+
+        stats = self.snapshot_after.compare_to(self.snapshot_before, 'traceback')
+        print(f"\nTop {top_n} memory usage by traceback:\n")
+        for stat in stats[:top_n]:
+            print("\n".join(stat.traceback.format()))
+            print(f"Memory Usage: {stat.size / 1024:.2f} KiB, Count: {stat.count}")
+
+    def reset(self):
+        """
+        重置快照，重新开始内存追踪
+        """
+        tracemalloc.stop()
+        self.snapshot_before = None
+        self.snapshot_after = None
+        tracemalloc.start(self.stack_depth)
+        print(f"{self.__class__.__name__} has been reset.")
+# endregion
+
+
 # region 获取储存大小
 def get_storage_size():
     '''
@@ -495,7 +566,6 @@ def get_interval_time(start, title='', print_info=True, digits=ROUND_DIGITS, for
     '''获取时间间隔'''
     interval = time.perf_counter() - start
     if print_info:
-        # print_title(f'Interval time: {round_float(interval, digits, format_type)} s')
         print_title(f'{title} takes {round_float(interval, digits, format_type)} s')
     return interval
 
@@ -519,238 +589,52 @@ def func_timer(func):
     return wrapper
 
 
+class Timer:
+    '''
+    计时器类
+    '''
+    def __init__(self, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+        self.title = title
+        self.print_info = print_info
+        self.digits = digits
+        self.format_type = format_type
+        self.start_time = None
+
+    def start(self):
+        self.start_time = get_start_time()
+        if self.print_info:
+            print_title(f'{self.title} starts')
+
+    def end(self):
+        if self.start_time is None:
+            print('Please start the timer first')
+            return None
+        self.interval = get_interval_time(self.start_time, title=self.title, print_info=self.print_info, digits=self.digits, format_type=self.format_type)
+        return self.interval
+
+    def stop(self):
+        '''停止计时,为了方便使用,end,stop都可以用'''
+        self.interval = self.end()
+        return self.interval
+
+
+class WithTimer(Timer):
+    '''
+    利用with语句计时
+    '''
+    def __init__(self, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+        super().__init__(title, print_info, digits, format_type)
+
+    def __enter__(self):
+        self.start()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end()
+
+
 def sleep(seconds):
     '''睡眠'''
     time.sleep(seconds)
-# endregion
-
-
-# region 测试相关函数
-def common_mistake():
-    '''常见错误'''
-    # 变量直接赋值导致的同时修改
-    # == 与 = 的混淆
-    # zip(a, b)的多次使用,导致zip对象被消耗,第二次使用时为空,可以使用转换为list或者tuple来解决(见函数get_reusable_zip)
-    # to be continued
-    pass
-
-
-def flex_func_printer(func, print_func=print, lite=True, multi_result=False):
-    '''
-    打印出函数的所有输入，输出以及变量名
-
-    参数:
-    func -- 要测试的函数
-    print_func -- 打印函数，默认为print
-    lite -- 打印是否简化，默认为True
-    multi_result -- 函数是否有多个返回值，默认为False
-
-    返回:
-    一个函数，用于测试func
-
-    使用例子:
-    @flex_func_printer
-    def some_function():
-        # some code here
-    
-    flex_func_printer(some_function)(*args, **kwargs)
-    '''
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        flex_print_title(print_func, f'Function: {func.__name__}')
-        
-        # 打印 args 及其位置索引
-        flex_print_title(print_func, 'Arguments')
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        for i, arg in enumerate(args):
-            flex_better_print(print_func, arg, name=params[i].name, lite=lite, print_title=False)
-        
-        # 打印 kwargs 及其变量名
-        flex_print_title(print_func, 'Keyword Arguments')
-        flex_print_dict(print_func, kwargs, name='Keyword Arguments', lite=lite, print_title=False)
-        
-        result = func(*args, **kwargs)
-        
-        # 打印结果
-        flex_print_title(print_func, 'Result')
-        if multi_result:
-            for i, r in enumerate(result):
-                flex_better_print(print_func, r, name=f'result_{i}', lite=lite, print_title=False)
-        else:
-            flex_better_print(print_func, result, name='result', lite=lite, print_title=False)
-        return result
-    return wrapper
-
-
-def flex_func_tester(func, print_func=print, lite=True, multi_result=False):
-    '''
-    计时，打印出函数的所有输入，输出以及变量名
-
-    参数:
-    func -- 要测试的函数
-    print_func -- 打印函数，默认为print
-    lite -- 打印是否简化，默认为True
-    multi_result -- 函数是否有多个返回值，默认为False
-
-    返回:
-    一个函数，用于测试func
-
-    使用例子:
-    @flex_func_tester
-    def some_function():
-        # some code here
-    
-    flex_func_tester(some_function)(*args, **kwargs)
-    '''
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        flex_print_title(print_func, f'Function: {func.__name__}')
-        
-        # 打印 args 及其位置索引
-        flex_print_title(print_func, 'Arguments')
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        for i, arg in enumerate(args):
-            flex_better_print(print_func, arg, name=params[i].name, lite=lite, print_title=False)
-        
-        # 打印 kwargs 及其变量名
-        flex_print_title(print_func, 'Keyword Arguments')
-        flex_print_dict(print_func, kwargs, name='Keyword Arguments', lite=lite, print_title=False)
-        
-        start = time.perf_counter()
-        result = func(*args, **kwargs)
-        end = time.perf_counter()
-        
-        # 打印结果
-        flex_print_title(print_func, 'Result')
-        if multi_result:
-            for i, r in enumerate(result):
-                flex_better_print(print_func, r, name=f'result_{i}', lite=lite, print_title=False)
-        else:
-            flex_better_print(print_func, result, name='result', lite=lite, print_title=False)
-
-        # 计时
-        interval = end - start
-        flex_print_title(print_func, f'{func.__name__} takes {round_float(interval, ROUND_DIGITS, ROUND_FORMAT)} s')
-        return result
-    return wrapper
-
-
-def message_decorator(message):
-    """
-    一个可以自定义输出消息的装饰器函数。
-
-    该装饰器可以用于装饰函数或类,在函数调用或类实例化时,
-    会打印一个自定义的消息。
-
-    参数:
-    message (str): 要输出的消息,可以使用 {0} 占位符来表示被装饰的对象名称。
-
-    返回:
-    function: 返回一个装饰器函数。
-
-    使用示例:
-    @message_decorator("The {0} needs improvement.")
-    def my_function():
-        pass
-
-    @message_decorator("The {0} needs to be tested.")
-    class MyClass:
-        pass
-
-    # 输出:
-    # The my_function needs improvement.
-    # The MyClass needs to be tested.
-    """
-    def decorator(obj):
-        if inspect.isfunction(obj):
-            @wraps(obj)
-            def wrapper(*args, **kwargs):
-                print(message.format(obj.__name__))
-                return obj(*args, **kwargs)
-            return wrapper
-        elif inspect.isclass(obj):
-            class NewClass(obj):
-                def __init__(self, *args, **kwargs):
-                    print(message.format(obj.__name__))
-                    super().__init__(*args, **kwargs)
-            return NewClass
-        else:
-            raise TypeError("This decorator supports only classes and functions.")
-    return decorator
-
-
-def to_be_improved(obj):
-    return message_decorator("The '{0}' needs improvement.")(obj)
-
-
-def to_be_test(obj):
-    return message_decorator("The '{0}' needs to be tested.")(obj)
-
-
-def deprecated(obj):
-    return message_decorator("The '{0}' is deprecated.")(obj)
-
-
-def not_recommend(obj):
-    return message_decorator("The '{0}' is not recommended.")(obj)
-
-
-def direct_use(obj):
-    return message_decorator("Directly use the code in '{0}'.")(obj)
-
-
-def func_printer(func, lite=True, multi_result=False):
-    '''
-    打印出函数的所有输入，输出以及变量名
-
-    参数:
-    func -- 要测试的函数
-
-    返回:
-    一个函数，用于测试func
-
-    使用例子:
-    @func_printer
-    def some_function():
-        # some code here
-    
-    func_printer(some_function)(*args, **kwargs)
-    '''
-    return flex_func_printer(func, print, lite, multi_result)
-
-
-def func_tester(func, lite=True, multi_result=False):
-    '''
-    计时，打印出函数的所有输入，输出以及变量名
-
-    参数:
-    func -- 要测试的函数
-
-    返回:
-    一个函数，用于测试func
-
-    使用例子:
-    @func_tester
-    def some_function():
-        # some code here
-    
-    func_tester(some_function)(*args, **kwargs)
-    '''
-    return flex_func_tester(func, print, lite, multi_result)
-
-
-def break_point(message='Break Point'):
-    '''
-    停止运行，打印消息
-    '''
-    assert False, message
-
-
-def print_current_line():
-    frame = inspect.currentframe()
-    print(f"Current line number: {frame.f_lineno}")
 # endregion
 
 
@@ -1288,6 +1172,306 @@ class CaptureManager:
 # endregion
 
 
+# region class decorator
+def method_decorator(decorator):
+    '''
+    将装饰器应用于类的所有方法
+
+    使用方法:
+    已有一个decorator,可以使用如下方式将其应用到类的所有方法
+    @class_decorator(decorator)
+    '''
+    def decorate(cls):
+        for attr_name, attr_value in cls.__dict__.items():
+            if callable(attr_value):  # 只处理可调用的方法
+                # 将装饰器应用到每个方法
+                setattr(cls, attr_name, decorator(attr_value))
+        return cls
+    return decorate
+# endregion
+
+
+# region 测试相关函数
+def common_mistake():
+    '''常见错误'''
+    # 变量直接赋值导致的同时修改
+    # == 与 = 的混淆
+    # zip(a, b)的多次使用,导致zip对象被消耗,第二次使用时为空,可以使用转换为list或者tuple来解决(见函数get_reusable_zip)
+    # to be continued
+    pass
+
+
+def flex_func_printer(func, print_func=print, lite=True, multi_result=False):
+    '''
+    打印出函数的所有输入,输出以及变量名
+
+    参数:
+    func -- 要测试的函数
+    print_func -- 打印函数,默认为print
+    lite -- 打印是否简化,默认为True
+    multi_result -- 函数是否有多个返回值,默认为False
+
+    返回:
+    一个函数,用于测试func
+
+    使用例子:
+    @flex_func_printer
+    def some_function():
+        # some code here
+    
+    flex_func_printer(some_function)(*args, **kwargs)
+    '''
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        flex_print_title(print_func, f'Function: {func.__name__}')
+        
+        # 打印 args 及其位置索引
+        flex_print_title(print_func, 'Arguments')
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        for i, arg in enumerate(args):
+            flex_better_print(print_func, arg, name=params[i].name, lite=lite, print_title=False)
+        
+        # 打印 kwargs 及其变量名
+        flex_print_title(print_func, 'Keyword Arguments')
+        flex_print_dict(print_func, kwargs, name='Keyword Arguments', lite=lite, print_title=False)
+        
+        result = func(*args, **kwargs)
+        
+        # 打印结果
+        flex_print_title(print_func, 'Result')
+        if multi_result:
+            for i, r in enumerate(result):
+                flex_better_print(print_func, r, name=f'result_{i}', lite=lite, print_title=False)
+        else:
+            flex_better_print(print_func, result, name='result', lite=lite, print_title=False)
+        return result
+    return wrapper
+
+
+def flex_func_tester(func, print_func=print, lite=True, multi_result=False):
+    '''
+    计时,打印出函数的所有输入,输出以及变量名
+
+    参数:
+    func -- 要测试的函数
+    print_func -- 打印函数,默认为print
+    lite -- 打印是否简化,默认为True
+    multi_result -- 函数是否有多个返回值,默认为False
+
+    返回:
+    一个函数,用于测试func
+
+    使用例子:
+    @flex_func_tester
+    def some_function():
+        # some code here
+    
+    flex_func_tester(some_function)(*args, **kwargs)
+    '''
+    return flex_func_printer(func_timer(func), print_func, lite, multi_result)
+
+
+def message_decorator(message, print_func=print):
+    """
+    一个可以自定义输出消息的装饰器函数
+
+    该装饰器可以用于装饰函数或类,在函数调用或类实例化时,
+    会打印一个自定义的消息
+
+    参数:
+    message (str): 要输出的消息,可以使用 {0} 占位符来表示被装饰的对象名称
+
+    返回:
+    function: 返回一个装饰器函数
+
+    使用示例:
+    @message_decorator("The {0} needs improvement.")
+    def my_function():
+        pass
+
+    @message_decorator("The {0} needs to be tested.")
+    class MyClass:
+        pass
+
+    # 输出:
+    # The my_function needs improvement.
+    # The MyClass needs to be tested.
+    """
+    def decorator(obj):
+        if inspect.isfunction(obj):
+            @wraps(obj)
+            def wrapper(*args, **kwargs):
+                print_func(message.format(obj.__name__))
+                return obj(*args, **kwargs)
+            return wrapper
+        elif inspect.isclass(obj):
+            for name, method in obj.__dict__.items():
+                if callable(method):
+                    if name == '__init__':
+                        message_formatted_by_cls_name = message.format(obj.__name__)
+                        setattr(obj, name, message_decorator(message=message_formatted_by_cls_name, print_func=print_func)(method))
+            return obj
+        else:
+            raise TypeError("This decorator supports only classes and functions.")
+    return decorator
+
+
+def to_be_improved(obj):
+    return message_decorator("The '{0}' needs improvement.")(obj)
+
+
+def to_be_test(obj):
+    return message_decorator("The '{0}' needs to be tested.")(obj)
+
+
+def deprecated(obj):
+    return message_decorator("The '{0}' is deprecated.")(obj)
+
+
+def not_recommend(obj):
+    return message_decorator("The '{0}' is not recommended.")(obj)
+
+
+def direct_use(obj):
+    return message_decorator("Directly use the code in '{0}'.")(obj)
+
+
+def func_printer(func, lite=True, multi_result=False):
+    '''
+    打印出函数的所有输入,输出以及变量名
+
+    参数:
+    func -- 要测试的函数
+
+    返回:
+    一个函数,用于测试func
+
+    使用例子:
+    @func_printer
+    def some_function():
+        # some code here
+    
+    func_printer(some_function)(*args, **kwargs)
+    '''
+    return flex_func_printer(func, print, lite, multi_result)
+
+
+def func_tester(func, lite=True, multi_result=False):
+    '''
+    计时,打印出函数的所有输入,输出以及变量名
+
+    参数:
+    func -- 要测试的函数
+
+    返回:
+    一个函数,用于测试func
+
+    使用例子:
+    @func_tester
+    def some_function():
+        # some code here
+    
+    func_tester(some_function)(*args, **kwargs)
+    '''
+    return flex_func_tester(func, print, lite, multi_result)
+
+
+def func_tracker(func, print_func=print_title):
+    '''
+    当函数被调用时,打印函数名
+    '''
+    return message_decorator("Running: {0}", print_func=print_func)(func)
+
+
+def init_tracker(func, print_func=print_title, cls_name=None):
+    '''
+    实例化时打印类名
+    '''
+    return message_decorator(f"Instance of {cls_name} created", print_func=print_func)(func)
+
+
+def cls_tracker(cls):
+    '''
+    遍历类的所有方法,给每个方法添加装饰器,实例化时打印类名,当方法被调用时,打印方法名
+    '''
+    for name, method in cls.__dict__.items():
+        if callable(method):
+            if name == '__init__':
+                setattr(cls, name, init_tracker(method, cls_name=cls.__name__))
+            else:
+                setattr(cls, name, func_tracker(method))
+    return cls
+
+
+def tracker(obj):
+    '''
+    根据对象的类型,选择合适的tracker
+    '''
+    if inspect.isfunction(obj):
+        return func_tracker(obj)
+    elif inspect.isclass(obj):
+        return cls_tracker(obj)
+
+
+def tracker_with_time(obj):
+    '''
+    tracker的增强版,在打印函数名的同时,还会打印时间
+    '''
+    if inspect.isfunction(obj):
+        return func_timer(func_tracker(obj))
+    elif inspect.isclass(obj):
+        return method_decorator(func_timer)(cls_tracker(obj))
+
+
+def break_point(message='Break Point'):
+    '''
+    停止运行，打印消息
+
+    注意:
+    python有内置的breakpoint,此函数与内置的函数不同
+    '''
+    assert False, message
+
+
+def print_current_line():
+    frame = inspect.currentframe()
+    print(f"Current line number: {frame.f_lineno}")
+
+
+def func_profiler(func):
+    """
+    Decorator to profile the execution of a function.
+    
+    Parameters:
+    - func: The function to profile.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with Profile() as profiler:
+            result = profiler.runcall(func, *args, **kwargs)
+        
+        # 创建Stats对象来查看分析结果
+        stats = Stats(profiler)
+        
+        # 清理文件路径信息，使输出更简洁
+        stats.strip_dirs()
+        
+        # 按累积时间排序并打印统计信息
+        stats.sort_stats('cumulative')
+        stats.print_stats()
+        
+        # 打印哪些函数调用了目标函数
+        print("\nCallers for each function:")
+        stats.print_callers()
+
+        # 返回函数结果
+        return result
+    
+    return wrapper
+# endregion
+
+
 # region 文件操作相关函数
 @message_decorator("it will print the common_functions.py, if you want to use it in another file, you can directly copy the code in the file, or in a better way, just use the current_file function")
 def current_file_py():
@@ -1720,6 +1904,28 @@ def get_reusable_zip(*iterables):
     
     # Return a list of tuples
     return list(zip(*iterables))
+# endregion
+
+
+# region enum枚举类型
+def enum_tutorial():
+    '''
+    使用enum来创建枚举类型
+
+    示例:
+    输入函数中作为一个选项,而不是直接输入字符串,这样可以规范输入防止拼写问题,并且方便扩展
+    一般来说,布尔值也不建议直接输入到函数中,而是使用枚举类型
+    class some_mode(Enum):
+        mode1 = 1
+        mode2 = 2
+
+    def some_func(mode):
+        if mode == some_mode.mode1:
+            do something
+        elif mode == some_mode.mode2:
+            do something
+    '''
+    pass
 # endregion
 
 
@@ -2666,17 +2872,17 @@ def get_tag(n, case=TAG_CASE, parentheses=TAG_PARENTHESES):
 # region 浮点数处理相关函数
 def get_decimal_num(number, abs_tol=1e-5, rel_tol=1e-5):
     """
-    计算浮点数的有效小数位数。如果某一位的小数值相对于数本身小于 tol,则从该位开始忽略。
+    计算浮点数的有效小数位数.如果某一位的小数值相对于数本身小于tol,则从该位开始忽略.
     
     :param number: 输入的浮点数
-    :param abs_tol: 容忍度，决定从哪一位开始忽略，默认值为 1e-5(如果不想检测abs_tol,可以设置为None)
-    :param rel_tol: 相对容忍度，决定从哪一位开始忽略，默认值为 1e-5(如果不想检测rel_tol,可以设置为None)
+    :param abs_tol: 容忍度,决定从哪一位开始忽略,默认值为 1e-5(如果不想检测abs_tol,可以设置为None)
+    :param rel_tol: 相对容忍度,决定从哪一位开始忽略,默认值为 1e-5(如果不想检测rel_tol,可以设置为None)
     :return: 小数位数
     """
     # 记录初始的小数位数
     decimal_count = 0
 
-    # 我们循环检查小数位，逐位扩大10倍，直到发现某一位可以忽略
+    # 我们循环检查小数位,逐位扩大10倍,直到发现某一位可以忽略
     while True:
         rounded_number = round(number, decimal_count)
         
@@ -2784,7 +2990,7 @@ def sci_str_to_latex(sci_str):
         raise ValueError('The input string is not in scientific notation.')
 
 
-def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT, latex=False):
     '''
     Rounds a float to a given number of digits and returns it in specified format.
 
@@ -2792,6 +2998,7 @@ def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
     - number: float, the number to be rounded.
     - digits: int, the number of digits to round to.
     - format_type: str, the format type for the output ('standard', 'scientific', 'percent', 'general'). 'general' means choose standard or scientific based on the length of the string representation.
+    - latex: bool, whether to return the rounded number as a LaTeX string for scientific notation.
 
     Returns:
     - str, the rounded number as a string in the specified format.
@@ -2799,30 +3006,43 @@ def round_float(number, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
     if format_type == 'general':
         result = f"{number:.{digits}g}"
         if 'e' in result:
-            return round_float(number, digits=digits, format_type='scientific')
+            return round_float(number, digits=digits, format_type='scientific', latex=latex)
         else:
             return result
     elif format_type == 'standard':
         return f"{number:.{digits}f}"
     elif format_type == 'scientific':
-        return sci_str_to_latex(f"{number:.{digits}e}")
+        if latex:
+            return sci_str_to_latex(f"{number:.{digits}e}")
+        else:
+            return f"{number:.{digits}e}"
     elif format_type == 'percent':
         return f"{number:.{digits}%}"
 
 
-def round_float_auto(number, **kwargs):
+def round_float_auto(number, format_type=ROUND_FORMAT, latex=False, **kwargs):
     '''
-    利用get_decimal_num函数自动确定小数位数
+    当没有科学记数法时,利用get_decimal_num函数自动确定小数位数
+    当科学记数法时(比如1.5*10^3),利用get_decimal_num确定1.5的小数位数
+
+    注意:
+    general的情形下,不会采取科学记数法,默认采取标准记数法(因为这个函数的特性在于自动确定小数位数,general无法判断采用哪种记数法)
     '''
-    decimal_count = get_decimal_num(number, **kwargs)
-    return round_float(number, digits=decimal_count, format_type='general')
+    if format_type == 'scientific':
+        coefficient, _ = get_coefficient_exponent(number)
+        decimal_count = get_decimal_num(coefficient, **kwargs)
+    else:
+        decimal_count = get_decimal_num(number, **kwargs)
+    return round_float(number, digits=decimal_count, format_type=format_type, latex=latex)
 
 
-def rnd(number, **kwargs):
+def get_coefficient_exponent(number, base=10):
     '''
-    round_float_auto的简写
+    将浮点数转换为系数和指数的形式
     '''
-    return round_float_auto(number, **kwargs)
+    exponent = int(np.floor(np.log(abs(number)) / np.log(base)))
+    coefficient = number / (base ** exponent)
+    return coefficient, exponent
 
 
 def sci_float_to_latex(number, base=10, base_str='10', round_digits=0):
@@ -2836,8 +3056,7 @@ def sci_float_to_latex(number, base=10, base_str='10', round_digits=0):
     if number == 0:
         return r"$0$"  # 0 doesn't have an exponential form
 
-    exp = int(np.floor(np.log(abs(number)) / np.log(base)))
-    coefficient = number / (base ** exp)
+    coefficient, exp = get_coefficient_exponent(number, base)
 
     # 当在整数模式下使用,良好的处理整数1和-1
     if np.allclose(round_digits, 0):
@@ -2849,21 +3068,21 @@ def sci_float_to_latex(number, base=10, base_str='10', round_digits=0):
     return fr"${coefficient:.{round_digits}f} \times {base_str}^{{{exp}}}$"
 
 
-def format_float(number, replace_dot=REPLACE_DOT, **kwargs):
+def format_float(number, format_type=ROUND_FORMAT, latex=False, replace_dot=REPLACE_DOT, **kwargs):
     '''
-    将浮点数格式化为字符串，支持自动确定小数位数。并且可以替换小数点为指定字符。
+    将浮点数格式化为字符串,支持自动确定小数位数.并且可以替换小数点为指定字符.
     '''
-    return round_float_auto(number, **kwargs).replace('.', replace_dot)
+    return round_float_auto(number, format_type=format_type, latex=latex, **kwargs).replace('.', replace_dot)
 
 
 def extract_float_from_filename(filename, key, separator="d"):
     """
-    从指定文件名中提取数值（整数或浮点数），支持自定义分隔符（如 d 或 .）。
+    从指定文件名中提取数值(整数或浮点数),支持自定义分隔符(如 d 或 .)
     
     参数:
         filename (str): 文件名
         key (str): 要匹配的 key
-        separator (str): 用于分隔整数和小数部分的符号，默认为 'd'
+        separator (str): 用于分隔整数和小数部分的符号,默认为 'd'
     
     返回:
         float: 文件名中的数值,如果没有匹配则raise ValueError
@@ -2900,37 +3119,6 @@ def get_filename_and_extension(filename, remove_ext_dot=True):
         extension = extension.lstrip('.')  # 去掉前导的点
     
     return name, extension
-
-
-def format_float_math_log(num, round_digits=ROUND_DIGITS, allclose_tol=1e-10):
-    """
-    格式化浮点数为科学计数法,并添加花括号。
-
-    参数:
-    - num (float): 待格式化的浮点数。
-    - round_digits (int, optional): 四舍五入的小数位数,默认为ROUND_DIGITS
-    - allclose_tol (float, optional): 用于判断是否为0的容差,默认为1e-10
-
-    返回:
-    - str: 格式化后的科学计数法字符串,带有花括号。
-
-    注意:
-    - 如果num为0,则返回"$0$";但是对于相当小的数,有可能allclose(0),但是不为0,这时候需要调整np.allclose的参数
-    """
-    if np.allclose(num, 0, atol=allclose_tol):
-        return "$0$"
-    else:
-        exponent = int(np.floor(np.log10(abs(num))))
-        coefficient = num / (10 ** exponent)
-        if np.allclose(coefficient, 0):
-            return "$0$"
-        if np.allclose(coefficient, 1):
-            return f"$10^{{{str(exponent)}}}$"
-        elif np.allclose(coefficient, -1):
-            return f"$-10^{{{str(exponent)}}}$"
-        else:
-            coefficient = round(coefficient, round_digits)
-            return f"${coefficient}x10^{{{str(exponent)}}}$"
 
 
 def align_decimal(number, reference_value):
@@ -3343,6 +3531,44 @@ def tuple_shape(tpl):
 
 
 # region DataFrame处理相关函数
+def reorder_df(df, new_row=None, new_col=None):
+    '''
+    按照指定顺序对DataFrame的行和列进行排序
+    '''
+    if new_row is not None:
+        df = df.loc[new_row]
+    if new_col is not None:
+        df = df[new_col]
+    return df
+
+
+def align_df_row_col_order(df, keep_which='row'):
+    '''
+    确保df的行和列顺序一致
+    '''
+    if keep_which == 'row':
+        return df.sort_index(axis=1).sort_index(axis=0)
+    elif keep_which == 'col':
+        return df.sort_index(axis=0).sort_index(axis=1)
+
+
+def get_pd_triangle_value(df, triangle_type='lower', diagonal=False):
+    '''
+    从Pandas DataFrame中提取三角形部分的值
+    df: 输入的DataFrame
+    triangle_type: 'lower' 或 'upper',表示提取下三角还是上三角部分,默认为None,表示提取全部
+    diagonal: 是否包括对角线
+    返回：提取的三角形部分的值
+    '''
+    # 确保行和列顺序一致
+    df_sorted = align_df_row_col_order(df)
+    
+    arr = df_sorted.to_numpy()  # 转换为Numpy数组
+    
+    # 使用get_triangle_value函数提取三角形部分
+    return get_arr_triangle_value(arr, triangle_type, diagonal)
+
+
 def get_zero_df(index, columns):
     '''创建一个DataFrame'''
     df = pd.DataFrame(np.zeros((len(index), len(columns))), index=index, columns=columns)
@@ -3417,6 +3643,32 @@ def double_sum_df(df, sum_type='intersect'):
 def flatten_array(arr):
     '''扁平化数组'''
     return arr.flatten()
+
+
+def get_arr_triangle_value(arr, triangle_type=None, diagonal=False):
+    """
+    获取数组的三角形部分的值
+    arr: 输入的二维数组或矩阵
+    triangle_type: 'lower' 或 'upper',表示提取下三角还是上三角部分,默认为None,表示提取全部
+    diagonal: 是否包括对角线
+    返回：提取的三角形部分的值
+    """
+    if triangle_type not in ['lower', 'upper', None]:
+        raise ValueError("triangle_type must be 'lower' or 'upper' or None")
+    
+    # 获取三角形的索引
+    if triangle_type == 'lower':
+        triangle_mask = np.tril(np.ones_like(arr, dtype=bool))  # 下三角
+    elif triangle_type == 'upper':
+        triangle_mask = np.triu(np.ones_like(arr, dtype=bool))  # 上三角
+    else:
+        triangle_mask = np.ones_like(arr, dtype=bool)  # 全部
+    
+    if not diagonal:
+        # 如果不包括对角线，去掉对角线
+        np.fill_diagonal(triangle_mask, False)
+    
+    return arr[triangle_mask]
 
 
 def get_nearby_idx(arr, index, nearby_index):
@@ -5146,6 +5398,66 @@ def get_corr(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY, sync=
     '''
     x, y = sync_special_value(x, y, inf_policy=inf_policy) if sync else (x, y)
     return np.corrcoef(process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy), process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy))[0, 1]
+
+
+def get_matrix_corr(matrix_x, matrix_y, triangle_type=None, diagonal=True, get_corr_kwargs=None):
+    '''
+    计算两个矩阵flatten后的相关系数
+    triangle_type: 'upper' or 'lower',表示只计算上三角或者下三角的相关系数,默认为None,表示计算全部
+    diagonal: True or False,表示是否计算对角线上的相关系数,默认为True,表示计入对角线
+    get_corr_kwargs: dict, get_corr函数的参数
+    '''
+    if get_corr_kwargs is None:
+        get_corr_kwargs = {}
+    matrix_x_value_to_compute = get_arr_triangle_value(matrix_x, triangle_type=triangle_type, diagonal=diagonal)
+    matrix_y_value_to_compute = get_arr_triangle_value(matrix_y, triangle_type=triangle_type, diagonal=diagonal)
+    return get_corr(matrix_x_value_to_compute, matrix_y_value_to_compute, **get_corr_kwargs)
+
+
+def get_rectangle_matrix_corr(matrix_x, matrix_y, diagonal=True, get_corr_kwargs=None):
+    '''
+    计算两个矩阵flatten后的相关系数,非方阵
+    diagonal: True or False,表示是否计算对角线上的相关系数,默认为True,表示计入对角线
+    get_corr_kwargs: dict, get_corr函数的参数
+    '''
+    if get_corr_kwargs is None:
+        get_corr_kwargs = {}
+    
+    if diagonal:
+        matrix_x_flat = matrix_x.flatten()
+        matrix_y_flat = matrix_y.flatten()
+    else:
+        # 创建非对角线元素的掩码
+        rows, cols = matrix_x.shape
+        mask = np.eye(rows, cols, dtype=bool)
+        non_diag_mask = ~mask
+        
+        # 应用掩码并展平
+        matrix_x_flat = matrix_x[non_diag_mask].flatten()
+        matrix_y_flat = matrix_y[non_diag_mask].flatten()
+    
+    # 调用相关系数计算函数
+    return get_corr(matrix_x_flat, matrix_y_flat, **get_corr_kwargs)
+
+
+def get_pd_corr(df_x, df_y, triangle_type=None, diagonal=True, get_corr_kwargs=None):
+    '''
+    计算两个DataFrame的相关系数,类似于get_matrix_corr
+    '''
+    if get_corr_kwargs is None:
+        get_corr_kwargs = {}
+    df_x_value_to_compute = get_arr_triangle_value(df_x, triangle_type=triangle_type, diagonal=diagonal)
+    df_y_value_to_compute = get_arr_triangle_value(df_y, triangle_type=triangle_type, diagonal=diagonal)
+    return get_corr(df_x_value_to_compute, df_y_value_to_compute, **get_corr_kwargs)
+
+
+def get_pd_rectangle_corr(df_x, df_y, diagonal=True, get_corr_kwargs=None):
+    '''
+    计算两个DataFrame的相关系数,类似于get_rectangle_matrix_corr
+    '''
+    df_x_aligned = align_df_row_col_order(df_x)
+    df_y_aligned = align_df_row_col_order(df_y)
+    return get_rectangle_matrix_corr(df_x_aligned.values, df_y_aligned.values, diagonal=diagonal, get_corr_kwargs=get_corr_kwargs)
 
 
 def get_CV(data, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
@@ -6926,7 +7238,7 @@ def sns_heatmap(ax, data, cmap=HEATMAP_CMAP, square=True, cbar=True, cbar_positi
     使用数据绘制热图,可以接受sns.heatmap的其他参数;注意,如果要让heatmap按照ax的框架显示,需要将square设置为False(如果想要mask是透明的,需要将mask_color设置为None)
     :param ax: matplotlib的轴对象,用于绘制图形
     :param data: 用于绘制热图的数据矩阵
-    :param cmap: 热图的颜色映射，默认为CMAP。可以是离散的或连续的，须与discrete参数相符合。
+    :param cmap: 热图的颜色映射,默认为CMAP。可以是离散的或连续的,须与discrete参数相符合。
     :param square: 是否以正方形显示每个cell,默认为True
     :param cbar: 是否显示颜色条,默认为True
     :param cbar_position: 颜色条的位置,默认为None,即使用默认位置;position参数可选'left', 'right', 'top', 'bottom'
@@ -8251,10 +8563,14 @@ def get_cmap(colors, continuous=True):
     '''
     生成颜色映射。
     :param colors: 颜色列表。
-    :param continuous: 是否为连续颜色映射，默认为True。
+    :param continuous: 是否为连续颜色映射,默认为True。
     '''
+    if len(colors) == 1:
+        local_colors = colors * 2
+    else:
+        local_colors = colors.copy()
     if continuous:
-        cmap = mcolors.LinearSegmentedColormap.from_list('custom', colors)
+        cmap = mcolors.LinearSegmentedColormap.from_list('custom', local_colors)
     else:
         cmap = mcolors.ListedColormap(colors)
     return cmap
@@ -8271,13 +8587,14 @@ def reverse_cmap(cmap):
 
 # region 初级作图函数(添加colorbar)
 @iterate_over_axs
-def add_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False, inset_mode='fig'):
+def add_colorbar(ax, mappable=None, cmap=CMAP, ticks=None, tick_labels=None, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False, inset_mode='fig'):
     '''
     在指定ax添加颜色条。目前设置norm_mode为'boundary'时，最好输入一个离散的cmap，否则在log模式下会出现问题。
     :param ax: matplotlib的轴对象，用于绘制图形。
     :param mappable: 用于绘制颜色条的对象，默认为None。
     :param cmap: 颜色条的颜色映射，默认为CMAP。可以是离散的或连续的，须与discrete参数相符合。
-    :param continuous_tick_num: 连续颜色条的刻度数量，默认为None,不作设置。
+    :param ticks: 颜色条的刻度，默认为None,自动设置;如果输入了,则会使用输入的刻度
+    :param tick_labels: 颜色条的刻度标签，默认为None,自动设置;如果输入了,则会使用输入的刻度标签
     :param discrete: 是否为离散颜色条，默认为False。
     :param discrete_num: 离散颜色条的数量，默认为5。
     :param discrete_label: 离散颜色条的标签，默认为None。
@@ -8388,14 +8705,16 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge
 
     # 假如颜色映射是一个离散的，则根据boundaries来设置ticks(假如输入了discrete_label,则插入中间刻度)
     if norm_mode == 'boundary':
-        ticks = mappable.norm.boundaries
-        if discrete_label is not None:
-            ticks = insert_mid(ticks)
-            if not display_edge_ticks:
-                # 去掉边缘的刻度,只保留中间的刻度
-                ticks = ticks[1::2]
+        if ticks is None:
+            ticks = mappable.norm.boundaries
+            if discrete_label is not None:
+                ticks = insert_mid(ticks)
+                if not display_edge_ticks:
+                    # 去掉边缘的刻度,只保留中间的刻度
+                    ticks = ticks[1::2]
     else:
-        ticks = cbar.get_ticks()
+        if ticks is None:
+            ticks = cbar.get_ticks()
         # 得到ticks中位于vmin和vmax之间的刻度
         ticks = [tick for tick in ticks if vmin <= tick <= vmax]
 
@@ -8411,15 +8730,16 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge
     cbar.set_ticks(ticks)
     
     # format cbar的刻度标签
-    if formatter is None:
-        if norm_mode == 'linear' or norm_mode == 'two_slope' or norm_mode == 'boundary':
-            tick_labels = [round_float(tick, round_digits, round_format_type) for tick in ticks]
-        elif norm_mode == 'log' or norm_mode == 'symlog':
-            tick_labels = [format_float_math_log(tick, round_digits) for tick in ticks]
-    else:
-        if formatter_kwargs is None:
-            formatter_kwargs = {}
-        tick_labels = [formatter(tick, **formatter_kwargs) for tick in ticks]
+    if tick_labels is None:
+        if formatter is None:
+            if norm_mode == 'linear' or norm_mode == 'two_slope' or norm_mode == 'boundary':
+                tick_labels = [round_float(tick, round_digits, round_format_type, latex=True) for tick in ticks]
+            elif norm_mode == 'log' or norm_mode == 'symlog':
+                tick_labels = [sci_float_to_latex(tick) for tick in ticks]
+        else:
+            if formatter_kwargs is None:
+                formatter_kwargs = {}
+            tick_labels = [formatter(tick, **formatter_kwargs) for tick in ticks]
 
     # 根据discrete_label进一步调整tick_labels
     if norm_mode == 'boundary':
@@ -8490,7 +8810,7 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge
         return [cbar]
 
 @iterate_over_axs
-def add_side_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False, inset_mode='fig'):
+def add_side_colorbar(ax, mappable=None, cmap=CMAP, ticks=None, tick_labels=None, discrete_label=None, display_edge_ticks=True, cbar_position=None, cbar_label=None, use_mask=False, mask_color=MASK_COLOR, mask_pos='start', mask_pad=0, mask_cbar_ratio=None, mask_tick='mask', mask_tick_loc=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False, inset_mode='fig'):
     '''
     在指定ax的旁边添加颜色条。特别注意，对于离散的cmap，用户一定要提供对应的discrete_num
     :param ax: matplotlib的轴对象，用于绘制图形。
@@ -8531,7 +8851,7 @@ def add_side_colorbar(ax, mappable=None, cmap=CMAP, discrete_label=None, display
         cbar_position = update_dict(CBAR_POSITION, cbar_position)
 
     side_ax = add_side_ax(ax, cbar_position['position'], cbar_position['size'], cbar_position['pad'], inset_mode=inset_mode)
-    return add_colorbar(side_ax, mappable=mappable, cmap=cmap, discrete_label=discrete_label, display_edge_ticks=display_edge_ticks, cbar_position=cbar_position, cbar_label=cbar_label, use_mask=use_mask, mask_color=mask_color, mask_pos=mask_pos, mask_pad=mask_pad, mask_cbar_ratio=mask_cbar_ratio, mask_tick=mask_tick, mask_tick_loc=mask_tick_loc, label_size=label_size, tick_size=tick_size, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, text_process=text_process, formatter=formatter, formatter_kwargs=formatter_kwargs, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq, inset_mode=inset_mode)
+    return add_colorbar(side_ax, mappable=mappable, cmap=cmap, ticks=ticks, tick_labels=tick_labels, discrete_label=discrete_label, display_edge_ticks=display_edge_ticks, cbar_position=cbar_position, cbar_label=cbar_label, use_mask=use_mask, mask_color=mask_color, mask_pos=mask_pos, mask_pad=mask_pad, mask_cbar_ratio=mask_cbar_ratio, mask_tick=mask_tick, mask_tick_loc=mask_tick_loc, label_size=label_size, tick_size=tick_size, adjust_tick_size=adjust_tick_size, tick_proportion=tick_proportion, label_kwargs=label_kwargs, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, text_process=text_process, formatter=formatter, formatter_kwargs=formatter_kwargs, round_digits=round_digits, round_format_type=round_format_type, add_leq=add_leq, add_geq=add_geq, inset_mode=inset_mode)
 
 @iterate_over_axs
 def add_scatter_colorbar(ax, mappable=None, cmap=CMAP, edgecolor=BLACK, tick_labels=None, cbar_label=None, cbar_position=None, label_size=CBAR_LABEL_SIZE, tick_size=CBAR_TICK_SIZE, text_pad=1.0, label_pad=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, label_kwargs=None, vnorm_mode='linear', vmin=None, vmax=None, vnorm_kwargs=None, snorm_mode='linear', smin=None, smax=None, snorm_kwargs=None, smap=partial(scale_to_new_range, old_min=0, old_max=1, new_min=0.05, new_max=0.95), use_mask=None, mask_marker='X', mask_smap_float=1.0, mask_color=MASK_COLOR, mask_text='mask', epsilon=1e-3, text_process=None, formatter=None, formatter_kwargs=None, round_digits=ROUND_DIGITS, round_format_type=ROUND_FORMAT, add_leq=False, add_geq=False):
@@ -8881,12 +9201,12 @@ def add_star_heatmap(ax, i, j, label=None, marker=STAR, color=RED, markersize=ST
 def add_vline(ax, x, label=None, color=RED, linestyle=AUXILIARY_LINE_STYLE, linewidth=LINE_WIDTH, **kwargs):
     '''
     在指定位置添加垂直线。
-    :param ax: matplotlib的轴对象，用于绘制图形。
+    :param ax: matplotlib的轴对象,用于绘制图形。
     :param x: 垂直线的x坐标。
-    :param label: 垂直线的标签，默认为None。
-    :param color: 垂直线的颜色，默认为RED。
-    :param linestyle: 垂直线的线型，默认为AUXILIARY_LINE_STYLE。
-    :param linewidth: 垂直线的线宽，默认为LINE_WIDTH。
+    :param label: 垂直线的标签,默认为None。
+    :param color: 垂直线的颜色,默认为RED。
+    :param linestyle: 垂直线的线型,默认为AUXILIARY_LINE_STYLE。
+    :param linewidth: 垂直线的线宽,默认为LINE_WIDTH。
     :param kwargs: 传递给`ax.axvline`的额外关键字参数。
     '''
     # 画图
@@ -8946,6 +9266,45 @@ def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_
         ax.axvline(x, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
     for y in y_list:
         ax.axhline(y, color=color, linestyle=linestyle, linewidth=linewidth, **kwargs)
+# endregion
+
+
+# region 初级作图函数(添加圆角矩形)
+def add_rounded_rectangle(ax, pad=0.05, corner_radius=0.1, edgecolor="black", facecolor="white", **kwargs):
+    """
+    在坐标轴周围添加圆角矩形框
+    
+    参数：
+    ax: matplotlib坐标轴对象
+    pad: 边距(归一化到画布尺寸,0-1之间)
+    corner_radius: 圆角半径(归一化到画布尺寸)
+    edgecolor: 边框颜色
+    facecolor: 填充颜色
+    **kwargs: 其他图形参数(颜色、线宽等)
+    """
+    # 获取坐标轴在画布中的位置信息
+    bbox = ax.get_position()
+    
+    # 计算新边界框的位置和尺寸
+    x0 = bbox.x0 - pad
+    y0 = bbox.y0 - pad
+    width = bbox.width + 2*pad
+    height = bbox.height + 2*pad
+    
+    # 创建圆角矩形补丁
+    rect = FancyBboxPatch(
+        (x0, y0), width, height,
+        boxstyle=f"round,pad=0,rounding_size={corner_radius}",
+        transform=ax.figure.transFigure,  # 使用画布坐标系
+        zorder=ax.get_zorder()-1,         # 确保在坐标轴下方
+        edgecolor=edgecolor,
+        facecolor=facecolor,
+        **kwargs
+    )
+    
+    # 将补丁添加到画布
+    ax.figure.patches.append(rect)
+    return rect
 # endregion
 
 
@@ -11177,7 +11536,7 @@ def add_text_by_dict(ax, text_dict, show_list=None, round_digit_dict=None, round
             local_key = format_text(key, text_process=text_process)
             value = text_dict[key]
 
-            round_value = round_float(value, round_digit_dict[key], round_format_dict[key])
+            round_value = round_float(value, round_digit_dict[key], round_format_dict[key], latex=True)
             if unit_dict[key] is not None:
                 if unit_mode == '()':
                     round_value = f'{round_value} ({unit_dict[key]})'
