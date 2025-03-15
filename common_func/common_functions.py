@@ -63,12 +63,18 @@ from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 import matplotlib.collections as mcoll
+import matplotlib.font_manager as fm
 from mpl_toolkits.mplot3d import Axes3D
 from PIL import Image
 import cv2
 from reportlab.pdfgen import canvas
 from pdf2image import convert_from_path
 import imageio
+# endregion
+
+
+# region cf目录
+CF_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前文件所在目录
 # endregion
 
 
@@ -87,6 +93,7 @@ BROWN = (0.50, 0.16, 0.16)
 CRIMSON = (220 / 255, 20 / 255, 60 / 255)
 CYAN = (0.01, 0.75, 0.75)
 MEGNETA = (1.00, 0.01, 1.00)
+TRANSPARENT = (0.00, 0.00, 0.00, 0.00)
 
 # mygo颜色
 RANA = (235 / 255, 235 / 255, 235 / 255)
@@ -109,16 +116,6 @@ KITA = (200 / 255, 102 / 255, 91 / 255)
 RYO = (93 / 255, 116 / 255, 165 / 255)
 BOCCHI_THE_ROCK_LIST = [BOCCHI, NIJIKA, KITA, RYO]
 BOCCHI_THE_ROCK_DICT = {'BOCCHI': BOCCHI, 'NIJIKA': NIJIKA, 'KITA': KITA, 'RYO': RYO}
-
-
-# NARUTO颜色
-NAGATO = (148 / 255, 70 / 255, 54 / 255)
-PAIN = (255 / 255, 153 / 255, 51 / 255)
-NARUTO = (255 / 255, 206 / 255, 26 / 255)
-SAKURA = (255 / 255, 169 / 255, 208 / 255)
-KONAN = (134 / 255, 139 / 255, 170 / 255)
-NARUTO_LIST = [NAGATO, PAIN, NARUTO, SAKURA, KONAN]
-NARUTO_DICT = {'NAGATO': NAGATO, 'PAIN': PAIN, 'NARUTO': NARUTO, 'SAKURA': SAKURA, 'KONAN': KONAN}
 
 
 # GOOGLE颜色
@@ -176,6 +173,8 @@ LEFT_SPINE = True     # 默认显示左方的轴脊柱
 BOTTOM_SPINE = True     # 默认显示下方的轴脊柱
 LEGEND_LOC = 'upper right'      # 图例位置
 PDF_FONTTYPE = 42     # 使pdf文件中的文字可编辑
+PS_FONTTYPE = 42     # 适用于PostScript导出
+PDF_USE14COREFONTS = False     # 禁用 14 种核心字体(强制嵌入自定义字体)
 PAD_INCHES = 0.2     # 默认图形边距
 USE_MATHTEXT = True     # 使用数学文本
 USE_OFFSET = False     # 不使用偏移
@@ -210,6 +209,8 @@ plt.rcParams['figure.dpi'] = FIG_DPI      # 图形的分辨率
 plt.rcParams['savefig.dpi'] = SAVEFIG_DPI      # 保存图像的分辨率
 plt.rcParams['legend.loc'] = LEGEND_LOC      # 图例位置
 plt.rcParams['pdf.fonttype'] = PDF_FONTTYPE     # 使pdf文件中的文字可编辑
+plt.rcParams['ps.fonttype'] = PS_FONTTYPE     # 适用于PostScript导出
+plt.rcParams['pdf.use14corefonts'] = PDF_USE14COREFONTS     # 禁用14种核心字体(强制嵌入自定义字体)
 plt.rcParams['savefig.pad_inches'] = PAD_INCHES     # 图形边距
 plt.rcParams['axes.formatter.use_mathtext'] = USE_MATHTEXT     # 使用数学文本
 plt.rcParams['axes.formatter.useoffset'] = USE_OFFSET     # 使用偏移
@@ -227,7 +228,9 @@ plt.rcParams['ytick.direction'] = TICK_DIRECTION   # y轴刻度线的方向
 plt.rcParams['axes.facecolor'] = AX_FACECOLOR  # 背景颜色
 plt.rcParams['figure.subplot.wspace'] = ADJUST_PARAMS_CUSTOM['wspace']  # 调整子图之间的间距
 plt.rcParams['figure.subplot.hspace'] = ADJUST_PARAMS_CUSTOM['hspace']  # 调整子图之间的间距
-#endregion
+fm.fontManager.addfont(os.path.join(CF_DIR, 'font/arial.ttf'))  # Specify the path to your local Arial TTF file from https://github.com/gasharper/linux-fonts/blob/master/arial.ttf
+plt.rcParams['font.family'] = 'Arial'  # Set Arial as the default font
+# endregion
 
 
 # region 全局参数
@@ -1522,7 +1525,7 @@ def current_file():
 
 
 def current_dir():
-    '''获取当前路径'''
+    '''获取当前路径(并不是common_functions.py所在的路径,而是调用common_functions.py的文件所在的路径)'''
     return os.getcwd()
 
 
@@ -1565,16 +1568,20 @@ def get_script_name(extension=True):
 def safe_path_join(*paths):
     '''
     os.path.join的再封装,保证不会因为中间的多余/或\导致路径不是预想的路径
+    并且如果输入了空字符串或者None,则会自动忽略
     '''
     # 清理每个路径，去除前导和尾随的斜杠（只保留中间路径的斜杠）
     cleaned_paths = []
     for i, path in enumerate(paths):
-        if i == 0:
-            # 第一个路径可以保留前导的斜杠（如果是绝对路径），但去掉尾部的斜杠
-            cleaned_paths.append(path.rstrip("/\\"))
+        if path is None or path == "":
+            continue
         else:
-            # 后续路径要去掉前导和尾随斜杠
-            cleaned_paths.append(path.strip("/\\"))
+            if i == 0:
+                # 第一个路径可以保留前导的斜杠（如果是绝对路径），但去掉尾部的斜杠
+                cleaned_paths.append(path.rstrip("/\\"))
+            else:
+                # 后续路径要去掉前导和尾随斜杠
+                cleaned_paths.append(path.strip("/\\"))
     
     # 使用 os.path.join 拼接清理后的路径
     return os.path.join(*cleaned_paths)
@@ -1849,6 +1856,23 @@ def insert_dir(fn, insert_str):
         shutil.move(os.path.join(fn, file), os.path.join(fn, insert_str, file))
 
 
+def check_all_file_exist(*paths):
+    '''
+    检查所有文件路径是否存在
+    参数: *paths (str): 可变数量的文件路径
+    返回: bool: 仅当所有路径对应的文件/目录均存在时返回True,否则返回False
+    '''
+    return all(os.path.exists(path) for path in paths)
+
+
+def get_subfile(basedir, full=True):
+    '''找到文件夹下的所有文件(非文件夹),full为True则返回全路径,否则只返回文件名'''
+    if full:
+        return [os.path.join(basedir, f) for f in os.listdir(basedir) if os.path.isfile(os.path.join(basedir, f))]
+    else:
+        return [f for f in os.listdir(basedir) if os.path.isfile(os.path.join(basedir, f))]
+
+
 def get_subdir(basedir, full=True):
     '''找到文件夹下的一级子文件夹,full为True则返回全路径,否则只返回文件夹名'''
     if full:
@@ -1856,14 +1880,14 @@ def get_subdir(basedir, full=True):
     else:
         return [d for d in os.listdir(basedir) if os.path.isdir(os.path.join(basedir, d))]
 
-
+@not_recommend
 def get_common_subdir(basedir, subdir_names=None):
     '''
     生成子目录的路径列表。
 
     Args:
-        basedir (str): 时间目录的路径。
-        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']。
+        basedir (str): 目录的路径
+        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']
 
     Returns:
         list: 子目录的完整路径列表。
@@ -1871,6 +1895,22 @@ def get_common_subdir(basedir, subdir_names=None):
     if subdir_names is None:
         subdir_names = ['outcomes', 'models', 'figs', 'logs', 'params']
     return [os.path.join(basedir, subdir_name) for subdir_name in subdir_names]
+
+
+def get_common_subdir_dict(basedir, subdir_names=None):
+    '''
+    生成子目录的路径字典
+    
+    Args:
+        basedir (str): 目录的路径
+        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']
+
+    Returns:
+        dict: 子目录的完整路径字典。
+    '''
+    if subdir_names is None:
+        subdir_names = ['outcomes', 'models', 'figs', 'logs', 'params']
+    return {subdir_name: os.path.join(basedir, subdir_name) for subdir_name in subdir_names}
 
 
 def find_fig(filename, order=None):
@@ -2048,16 +2088,16 @@ def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dic
 
     if save_func_dict is None:
         save_func_dict = create_dict(key_to_save, None)
+
+    for k, v in save_func_dict.items():
+        if v is None:
+            save_func_dict[k] = get_save_function_for_object(dict_data[k])
     
     if save_kwargs_dict is None:
         save_kwargs_dict = create_dict(key_to_save, None)
     for k, v in save_kwargs_dict.items():
         if v is None:
             save_kwargs_dict[k] = {}
-
-    for k, v in save_func_dict.items():
-        if v is None:
-            save_func_dict[k] = get_save_function_for_object(dict_data[k])
     
     if overwrite and os.path.exists(save_dir):
         shutil.rmtree(save_dir)
@@ -2165,6 +2205,10 @@ def pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir):
     弹出一部分参数,并且返回路径名
     '''
     local_dict_data = dict_data.copy()
+    if value_dir_key is None:
+        value_dir_key = []
+    if both_dir_key is None:
+        both_dir_key = []
     for key in value_dir_key:
         basedir = os.path.join(basedir, str(dict_data[key]))
         local_dict_data.pop(key)
@@ -2177,6 +2221,9 @@ def pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir):
 def save_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, format_list=None):
     '''
     把一部分参数保存到路径名里,另一部分参数保存到文件里
+
+    注意:
+    保存在路径名里的参数会被弹出,不会保存到文件里
     '''
     local_dict_data, dictdir = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)
     save_dict(local_dict_data, os.path.join(dictdir, dict_name), format_list)
@@ -2186,6 +2233,9 @@ def save_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_ke
 def save_timed_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, after_timedir='', current_time=None, format_list=None):
     '''
     把一部分参数保存到路径名里,另一部分参数保存到文件里,并且在路径名里加入时间
+
+    注意:
+    保存在路径名里的参数会被弹出,不会保存到文件里
     '''
     if current_time is None:
         current_time = get_time()
@@ -2199,6 +2249,7 @@ def save_timed_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_
 def save_pkl(obj, filename, format='joblib', compress=0, protocol=None, add_ext='auto'):
     '''
     保存对象到pkl文件(在本代码中pkl被认为是一种通用的保存格式,可以用joblib方法或者pickle方法保存,默认使用joblib方法[这可能会让人觉得有疑问,但是各类函数中的pkl都会优先使用joblib方法])
+    虽然保存时优先使用joblib,但是加载时会兼容pkl,pickle,joblib三种格式,以对旧版本或者外源性的pkl文件进行兼容
     '''
     if format == 'joblib':
         save_joblib(obj, filename, compress=compress, protocol=protocol, add_ext=add_ext)
@@ -2396,18 +2447,22 @@ def search_dict_subdir(dict_data, basedir, pkl_name, ext='joblib', value_dir_key
     比较参数,如果参数不同,则返回False,如果参数相同,则返回对应文件夹,这个函数会遍历basedir下面的所有一级子文件夹,然后在每个一级子文件夹内的after_subdir文件夹下查找pkl文件
 
     适用场景:
-    如果是pop_dict_get_dir保存,并且用时间作为文件夹,那么这个函数可以用来查找是否已经保存过这个dict,如果保存过,则返回对应的时间文件夹,否则返回False
+    如果是pop_dict_get_dir保存,并且用时间作为文件夹,那么这个函数可以用来查找是否已经保存过这个dict,如果保存过,则返回对应的时间文件夹,和True,否则返回None和False
+
+    返回:
+    str: 时间文件夹的路径(没找到则为None)
+    bool: 是否找到对应的文件
     '''
     local_dict_data, basedir = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)
     if not os.path.exists(basedir):
-        return False
+        return None, False
     for time_dir in get_subdir(basedir):
         pkl_dir = os.path.join(time_dir, after_subdir, f'{pkl_name}.{ext}')
         if os.path.exists(pkl_dir):
             exist_dict_data = load_pkl(pkl_dir)
             if compare_dict(local_dict_data, exist_dict_data, ignore_key):
-                return time_dir
-    return False
+                return time_dir, True
+    return None, False
 
 
 def compare_dict(dict1, dict2, ignore_key=None):
@@ -2436,13 +2491,13 @@ def save_df(df, filename, index=True, format_list=None):
     - format_list: List of formats to save the DataFrame in.
     '''
     if format_list is None:
-        format_list = ['xlsx', 'pkl']
+        format_list = ['xlsx', 'joblib']
 
     # 创建文件夹
     mkdir(os.path.dirname(filename))
 
     # 将文件名和格式分开,并且将文件名的后缀添加到format_list中
-    if filename.endswith('.csv') or filename.endswith('.xlsx') or filename.endswith('.pkl') or filename.endswith('.pickle') or filename.endswith('.joblib'):
+    if filename.endswith('.csv') or filename.endswith('.xlsx') or filename.endswith('.joblib'):
         format_list.append(filename.split('.')[-1])
         base_filename = os.path.splitext(filename)[0]
     else:
@@ -2455,11 +2510,11 @@ def save_df(df, filename, index=True, format_list=None):
             df.to_csv(full_filename, index=index)
         elif format == 'xlsx':
             df.to_excel(full_filename, index=index, engine='openpyxl')
-        elif format == 'pkl':
+        elif format == 'joblib':
             df.to_pickle(full_filename)
         else:
             raise ValueError(
-                "Unsupported file type. Please use csv, xlsx, or pkl")
+                "Unsupported file type. Please use csv, xlsx, or joblib")
 
 
 def load_df(filename, index_col=0, index_dtype=str, col_dtype=str):
@@ -2473,7 +2528,7 @@ def load_df(filename, index_col=0, index_dtype=str, col_dtype=str):
     '''
     # Check if the file exists with the provided extension
     if os.path.exists(filename):
-        if filename.endswith('.pkl'):
+        if filename.endswith('.pkl') or filename.endswith('.joblib') or filename.endswith('.pickle'):
             df = pd.read_pickle(filename)
         elif filename.endswith('.xlsx'):
             df = pd.read_excel(
@@ -2481,11 +2536,11 @@ def load_df(filename, index_col=0, index_dtype=str, col_dtype=str):
         elif filename.endswith('.csv'):
             df = pd.read_csv(filename, index_col=index_col)
         else:
-            for ext in ['.pkl', '.xlsx', '.csv']:
+            for ext in ['.xlsx', '.csv', '.pkl', '.joblib', '.pickle']:
                 if os.path.exists(filename+ext):
                     return load_df(filename+ext, index_col, index_dtype, col_dtype)
             raise ValueError(
-                "Unsupported file extension. Please ensure the file is .csv, .xlsx, or .pkl")
+                "Unsupported file extension. Please ensure the file is .csv, .xlsx")
 
         df.index = df.index.astype(index_dtype)
         df.columns = df.columns.astype(col_dtype)
@@ -2591,10 +2646,10 @@ def load_sps_array(filename):
 
 def load_txt(filename):
     '''
-    从txt文件中加载数据。
+    从txt文件中加载数据
 
     参数:
-    filename: str要加载的文件名，可以带有后缀或不带有后缀。
+    filename: str要加载的文件名,可以带有后缀或不带有后缀
     '''
     if not filename.endswith('.txt'):
         filename += '.txt'
@@ -3340,13 +3395,13 @@ def flatten_list(input_list, level=None):
 
 def union_list(*lists):
     '''
-    获取多个列表的并集。
+    获取多个列表的并集(去重)
     
     参数:
-    - lists: 一个或多个列表的可变参数。
+    - lists: 一个或多个列表的可变参数
     
     返回:
-    - 一个列表，包含所有输入列表的并集。
+    - 一个列表，包含所有输入列表的并集
     '''
     union_set = set()
     for lst in lists:
@@ -3550,6 +3605,19 @@ def align_df_row_col_order(df, keep_which='row'):
         return df.sort_index(axis=1).sort_index(axis=0)
     elif keep_which == 'col':
         return df.sort_index(axis=0).sort_index(axis=1)
+
+
+def get_sub_df(df, row_list=None, col_list=None):
+    '''
+    获取DataFrame的子集
+    '''
+    if row_list is not None:
+        new_df = df.loc[row_list]
+    else:
+        new_df = df.copy()
+    if col_list is not None:
+        new_df = new_df[col_list]
+    return new_df
 
 
 def get_pd_triangle_value(df, triangle_type='lower', diagonal=False):
@@ -6324,8 +6392,9 @@ def plt_scatter(ax, x, y, label=None, color=BLUE, vert=True, rasterized=False, r
         x, y = y, x
 
     if (rasterized_threshold is not None) and (rasterized_threshold is not False):
-        if len(x) > rasterized_threshold:
-            rasterized = True
+        if isinstance(x, np.ndarray) or isinstance(x, list):
+            if len(x) > rasterized_threshold:
+                rasterized = True
 
     # 画图
     if 'c' in kwargs:
@@ -9270,7 +9339,7 @@ def add_grid(ax, x_list=None, y_list=None, color=RANA, linestyle=AUXILIARY_LINE_
 
 
 # region 初级作图函数(添加圆角矩形)
-def add_rounded_rectangle(ax, pad=0.05, corner_radius=0.1, edgecolor="black", facecolor="white", **kwargs):
+def add_rounded_rectangle(ax, pad=0.05, corner_radius=0.02, edgecolor="black", facecolor="white", **kwargs):
     """
     在坐标轴周围添加圆角矩形框
     
@@ -9292,7 +9361,7 @@ def add_rounded_rectangle(ax, pad=0.05, corner_radius=0.1, edgecolor="black", fa
     height = bbox.height + 2*pad
     
     # 创建圆角矩形补丁
-    rect = FancyBboxPatch(
+    rect = mpatches.FancyBboxPatch(
         (x0, y0), width, height,
         boxstyle=f"round,pad=0,rounding_size={corner_radius}",
         transform=ax.figure.transFigure,  # 使用画布坐标系
@@ -9615,13 +9684,13 @@ def add_text(ax, text, x=TEXT_X, y=TEXT_Y, text_process=None, transform='ax', va
     '''
 
     在指定位置添加文字。
-    :param ax: matplotlib的轴对象，用于绘制图形。
-    :param text: 文本内容。
-    :param x: 文本的x坐标，默认为0.05。
-    :param y: 文本的y坐标，默认为0.95。
-    :param text_process: 文本处理参数，默认为TEXT_PROCESS。
-    :param transform: 文本的坐标系，默认为'ax'。也可以选择'fig'或'data'。
-    :param kwargs: 传递给`ax.text`的额外关键字参数。
+    :param ax: matplotlib的轴对象,用于绘制图形
+    :param text: 文本内容
+    :param x: 文本的x坐标,默认为0.05
+    :param y: 文本的y坐标,默认为0.95
+    :param text_process: 文本处理参数,默认为TEXT_PROCESS
+    :param transform: 文本的坐标系,默认为'ax'.也可以选择'fig'或'data'
+    :param kwargs: 传递给'ax.text'的额外关键字参数
     '''
     text_process = update_dict(TEXT_PROCESS, text_process)
 
@@ -10648,25 +10717,27 @@ def plt_polygon_heatmap(ax, xy_dict, value_dict, mask=None, mask_color=MASK_COLO
     绘制多边形热力图。
 
     参数:
-    - ax (matplotlib.axes.Axes): matplotlib的轴对象，用于绘制图形。
+    - ax (matplotlib.axes.Axes): matplotlib的轴对象,用于绘制图形
     - xy_dict (dict): 包含多个区域的顶点坐标的字典。示例: {'region1': [(0, 0), (1, 1), (1, 0)], 'region2': [(1, 1), (2, 2), (2, 1)]}
     - value_dict (dict): 包含多个区域的值的字典。示例: {'region1': 1, 'region2': 2}
-    - norm_mode (str, optional): 归一化模式，默认为'linear'。
-    - vmin (float or None, optional): 区域值的最小值，默认为None。
-    - vmax (float or None, optional): 区域值的最大值，默认为None。
-    - norm_kwargs (dict or None, optional): 传递给get_norm的额外关键字参数。
-    - cmap (str or matplotlib.colors.Colormap, optional): 区域值的颜色映射，默认为CMAP。
-    - edgecolor (str or tuple, optional): 区域的边框颜色，默认为BLACK。
-    - cbar (bool, optional): 是否显示颜色条，默认为True。
-    - cbar_position (str or None, optional): 颜色条的位置，默认为None。
-    - cbar_label (str or None, optional): 颜色条的标签，默认为None。
-    - fill (bool, optional): 是否填充区域。(如果为False,则为区域的边框,这时可以通过linewidth参数控制边框宽度)
-    - adjust_lim (bool, optional): 是否根据区域的位置和大小调整轴的限制。
-    - polygon_kwargs (dict or None, optional): 传递给plt_polygon的额外关键字参数。
-    - cbar_kwargs (dict or None, optional): 传递给add_side_colorbar的额外关键字参数。
+    - mask (dict or None, optional): 包含多个区域的掩码的字典,默认为None
+    - mask_color (str or tuple, optional): 掩码的颜色,默认为MASK_COLOR
+    - norm_mode (str, optional): 归一化模式，默认为'linear'
+    - vmin (float or None, optional): 区域值的最小值,默认为None
+    - vmax (float or None, optional): 区域值的最大值,默认为None
+    - norm_kwargs (dict or None, optional): 传递给get_norm的额外关键字参数
+    - cmap (str or matplotlib.colors.Colormap, optional): 区域值的颜色映射,默认为CMAP
+    - edgecolor (str or tuple, optional): 区域的边框颜色,默认为BLACK
+    - cbar (bool, optional): 是否显示颜色条,默认为True
+    - cbar_position (str or None, optional): 颜色条的位置,默认为None
+    - cbar_label (str or None, optional): 颜色条的标签,默认为None
+    - fill (bool, optional): 是否填充区域(如果为False,则为区域的边框,这时可以通过linewidth参数控制边框宽度)
+    - adjust_lim (bool, optional): 是否根据区域的位置和大小调整轴的限制
+    - polygon_kwargs (dict or None, optional): 传递给plt_polygon的额外关键字参数
+    - cbar_kwargs (dict or None, optional): 传递给add_side_colorbar的额外关键字参数
 
     返回:
-    - add_side_colorbar的返回值，如果cbar为False，则返回None。
+    - add_side_colorbar的返回值,如果cbar为False,则返回None。
     '''
     # 设置默认参数
     if vmin is None:
@@ -10679,8 +10750,12 @@ def plt_polygon_heatmap(ax, xy_dict, value_dict, mask=None, mask_color=MASK_COLO
     # 获取use_mask
     if mask is None:
         use_mask = False
-    else:
-        use_mask = True
+    elif isinstance(mask, dict):
+        # 判断是否存在掩码
+        if any(mask.values()):
+            use_mask = True
+        else:
+            use_mask = False
 
     # 得到norm
     norm = get_norm(norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
