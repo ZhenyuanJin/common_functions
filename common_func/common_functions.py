@@ -29,6 +29,7 @@ import logging
 from cProfile import Profile
 from pstats import Stats
 import tracemalloc
+import itertools
 
 
 # 数学和科学计算库
@@ -95,7 +96,7 @@ CYAN = (0.01, 0.75, 0.75)
 MEGNETA = (1.00, 0.01, 1.00)
 TRANSPARENT = (0.00, 0.00, 0.00, 0.00)
 
-# mygo颜色
+# region mygo颜色
 RANA = (235 / 255, 235 / 255, 235 / 255)
 ANON = (255 / 255, 178 / 255, 212 / 255)
 UIKA = (251 / 255, 230 / 255, 153 / 255)
@@ -107,27 +108,27 @@ TAKI = (105 / 255, 92 / 255, 97 / 255)
 NYAMU = (135 / 255, 124 / 255, 157 / 255)
 MYGO_LIST = [RANA, ANON, UIKA, MUTSUMI, SOYO, SAKIKO, TOMORI, TAKI, NYAMU]
 MYGO_DICT = {'RANA': RANA, 'ANON': ANON, 'UIKA': UIKA, 'MUTSUMI': MUTSUMI, 'SOYO': SOYO, 'SAKIKO': SAKIKO, 'TOMORI': TOMORI, 'TAKI': TAKI, 'NYAMU': NYAMU}
+# endregion
 
-
-# 孤独摇滚颜色
+# region 孤独摇滚颜色
 BOCCHI = (239 / 255, 176 / 255, 193 / 255)
 NIJIKA = (238 / 255, 218 / 255, 137 / 255)
 KITA = (200 / 255, 102 / 255, 91 / 255)
 RYO = (93 / 255, 116 / 255, 165 / 255)
 BOCCHI_THE_ROCK_LIST = [BOCCHI, NIJIKA, KITA, RYO]
 BOCCHI_THE_ROCK_DICT = {'BOCCHI': BOCCHI, 'NIJIKA': NIJIKA, 'KITA': KITA, 'RYO': RYO}
+# endregion
 
-
-# GOOGLE颜色
+# region GOOGLE颜色
 GOOGLE_BLUE = (66/255, 133/255, 244/255)
 GOOGLE_RED = (234/255, 67/255, 53/255)
 GOOGLE_YELLOW = (251/255, 188/255, 5/255)
 GOOGLE_GREEN = (52/255, 168/255, 83/255)
 GOOGLE_LIST = [GOOGLE_BLUE, GOOGLE_RED, GOOGLE_YELLOW, GOOGLE_GREEN]
 GOOGLE_DICT = {'GOOGLE_BLUE': GOOGLE_BLUE, 'GOOGLE_RED': GOOGLE_RED, 'GOOGLE_YELLOW': GOOGLE_YELLOW, 'GOOGLE_GREEN': GOOGLE_GREEN}
+# endregion
 
-
-# F1颜色
+# region F1颜色
 FERRARI = (211 / 255, 45 / 255, 53 / 255)
 MCLAREN = (239 / 255, 136 / 255, 51 / 255)
 ALPINE = (239 / 255, 142 / 255, 187 / 255)
@@ -141,11 +142,13 @@ ASTONMARTIN = (75 / 255, 151 / 255, 116 / 255)
 F1_LIST = [FERRARI, MCLAREN, ALPINE, REDBULL, ALPHATAURI, WILLIAMS, HAAS, MERCEDES, SAUBER, ASTONMARTIN]
 F1_DICT = {'FERRARI': FERRARI, 'MCLAREN': MCLAREN, 'ALPINE': ALPINE, 'REDBULL': REDBULL, 'ALPHATAURI': ALPHATAURI, 'WILLIAMS': WILLIAMS, 'HAAS': HAAS, 'MERCEDES': MERCEDES, 'SAUBER': SAUBER, 'ASTONMARTIN': ASTONMARTIN}
 # endregion
+# endregion
 
 
 # region 用于plt设置
 MARGIN = {'left': 0.2, 'right': 0.85, 'bottom': 0.2, 'top': 0.85}     # 默认图形边距
 SPACIOUS_MARGIN = {'left': 0.25, 'right': 0.8, 'bottom': 0.25, 'top': 0.8}     # 边框较宽的图形边距
+COMPACT_MARGIN = {'left': 0.1, 'right': 0.95, 'bottom': 0.1, 'top': 0.95}     # 边框较窄的图形边距
 CBAR_MARGIN = {'left': 0.2, 'right': 0.8, 'bottom': 0.2, 'top': 0.85}     # 当右侧添加了colorbar时, 推荐的图形边距
 MARGIN_3D = {'left': 0.15, 'right': 0.85, 'bottom': 0.1, 'top': 0.85}     # 3d图形的默认边距
 CBAR_MARGIN_3D = {'left': 0.15, 'right': 0.7, 'bottom': 0.1, 'top': 0.85}     # 3d图形带有cbar的默认边距
@@ -234,24 +237,24 @@ plt.rcParams['font.family'] = 'Arial'  # Set Arial as the default font
 
 
 # region 全局参数
-# 随机种子
+# region 随机种子
 SEED = 421
+# endregion
 
-
-# 数值处理参数
+# region 数值处理参数
 ROUND_DIGITS = 3
 ROUND_FORMAT = 'general'
 INF_POLICY = 'to_nan'
 NAN_POLICY = 'drop'
+# endregion
 
-
-# 文本处理参数
+# region 文本处理参数
 TEXT_PROCESS = {'capitalize': True, 'replace_underscore': ' ', 'ignore_equation_underscore': True}
 REPLACE_DOT = 'd'
 FILENAME_PROCESS = {'replace_blank': '_', 'replace_dot': REPLACE_DOT} # replace_blank: 替换空格, replace_dot: 替换点
+# endregion
 
-
-# 图形样式参数
+# region 图形样式参数
 BAR_WIDTH = 0.8
 BIN_NUM = 20
 XTICK_ROTATION = 90
@@ -279,20 +282,21 @@ TITLE_PAD = TITLE_SIZE/3     # 标题间距(间距的单位是字体大小)
 TEXT_VA = 'top'
 TEXT_HA = 'left'
 # TEXT_KWARGS = {'verticalalignment': TEXT_VA, 'horizontalalignment': TEXT_HA, 'fontsize': FONT_SIZE, 'color': BLACK}
+# endregion
 
-
-# 图形布局参数
+# region 图形布局参数
 BBOX_INCHES = None
 SIDE_PAD = 0.03
 CBAR_POSITION = {'position': 'right', 'size': 0.05, 'pad': SIDE_PAD}
 CBAR_POSITION_3D = {'position': 'right', 'size': 0.05, 'pad': SIDE_PAD * 6}
 TICK_PROPORTION = 0.9    # 刻度标签的拥挤程度,1代表完全贴住,见suitable_tick_size与adjust_ax_tick
+# endregion
 
-
-# 保存fig参数
+# region 保存fig参数
 SAVEFIG_PKL = False
+# endregion
 
-# 颜色映射参数(注意,颜色映射在使用整数调用时会出现和使用浮点数调用时不同的效果,比如输入1会映射到第一个颜色,但输入1.0会映射到cmap的最顶端)
+# region 颜色映射参数(注意,颜色映射在使用整数调用时会出现和使用浮点数调用时不同的效果,比如输入1会映射到第一个颜色,但输入1.0会映射到cmap的最顶端)
 CMAP = plt.cm.viridis
 HEATMAP_CMAP = plt.cm.jet
 DENSITY_CMAP = mcolors.LinearSegmentedColormap.from_list("density_cmap", [RANA, BLUE])
@@ -313,14 +317,14 @@ CLOUD_CMAP = mcolors.LinearSegmentedColormap.from_list("cloud_cmap", ['#F0F8FF',
 PINEAPPLE_CMAP = mcolors.LinearSegmentedColormap.from_list("pineapple_cmap", ['#FFEE58', '#D4E157', '#7DB93D'])
 CMAP_DICT = {'viridis': plt.cm.viridis, 'jet': plt.cm.jet, 'density': DENSITY_CMAP, 'contrast': CONTRAST_CMAP, 'contrast_with_mid': CONTRAST_WITH_MID_CMAP, 'contrast_gray': CONTRAST_GRAY_CMAP, 'rgb': RGB_CMAP, 'mars': MARS_CMAP, 'ocean': OCEAN_CMAP, 'march_7th': MARCH_7TH_CMAP, 'sakura': SAKURA_CMAP, 'forest': FOREST_CMAP, 'desert': DESERT_CMAP, 'lavender': LAVENDER_CMAP, 'sunset': SUNSET_CMAP, 'cloud': CLOUD_CMAP, 'pineapple': PINEAPPLE_CMAP}
 CLABEL_KWARGS = {'inline': True, 'fontsize': FONT_SIZE, 'fmt': f'%.{ROUND_DIGITS}g'}
+# endregion
 
-
-# 视频参数
+# region 视频参数
 SAVEVIDEO_FORMAT = 'mp4'
 FRAME_RATE = 5
+# endregion
 
-
-# 添加图片tag相关参数
+# region 添加图片tag相关参数
 TAG_CASE = 'lower'     # 默认tag大小写
 TAG_PARENTHESES = False     # 默认tag是否加括号
 FIG_TAG_POS = (0.05, 0.95)     # 默认图形tag位置
@@ -328,15 +332,16 @@ AX_TAG_POS = (-0.2, 1.2)     # 默认坐标轴tag位置
 TAG_SIZE = SUP_TITLE_SIZE     # 默认tag字体大小
 TAG_VA = TEXT_VA     # 默认tag垂直对齐方式
 TAG_HA = TEXT_HA     # 默认tag水平对齐方式
+# endregion
 
-
-# print相关参数
+# region print相关参数
 PRINT_WIDTH = 80     # 默认打印宽度
 PRINT_CHAR = '-'     # 默认打印字符
+# endregion
 
-
-# multiprocess
+# region multiprocess
 PROCESS_NUM = min(40, int(multiprocessing.cpu_count()/3))    # 默认multiprocess的数量
+# endregion
 # endregion
 
 
@@ -526,6 +531,13 @@ def get_time_seed():
 
     # 结合时间戳和微秒数作为种子,为了防止超出随机数生成器的范围,取模
     return (timestamp * 1000000 + microsecond) % (2**31-1)
+
+
+def get_local_rng_by_time():
+    '''
+    返回局部随机数生成器(rng:Random Number Generator)
+    '''
+    return np.random.RandomState(get_time_seed())
 # endregion
 
 
@@ -3637,6 +3649,33 @@ def get_pd_triangle_value(df, triangle_type='lower', diagonal=False):
     return get_arr_triangle_value(arr, triangle_type, diagonal)
 
 
+def replace_df_diagonal(df, replace_value=0):
+    '''
+    将DataFrame对角线上的元素替换为指定值
+    '''
+    df_copy = df.copy()
+    for row in df_copy.index:
+        for col in df_copy.columns:
+            if row == col:
+                df_copy.loc[row, col] = replace_value
+    return df_copy
+
+
+def symmetrize_df(df):
+    '''
+    将DataFrame转换为对称矩阵
+    '''
+    # 确保df的row和col集合是一样的(顺序可以不一样)
+    if not set(df.index) == set(df.columns):
+        raise ValueError('The DataFrame must have the same row and column names.')
+    new_df = df.copy()
+    for row in new_df.index:
+        for col in new_df.columns:
+            if row != col:
+                new_df.loc[col, row] = (df.loc[row, col] + df.loc[col, row] ) / 2
+    return new_df
+
+
 def get_zero_df(index, columns):
     '''创建一个DataFrame'''
     df = pd.DataFrame(np.zeros((len(index), len(columns))), index=index, columns=columns)
@@ -3648,6 +3687,21 @@ def index_col_str(df):
     '''将df的index和columns转换为字符串'''
     df.index = df.index.astype(str)
     df.columns = df.columns.astype(str)
+
+
+def normalize_df_with_sum(df, row_or_col):
+    '''
+    正则化df,使得行或列的和为1
+
+    注意:
+    nan值会被当作0处理
+    '''
+    if row_or_col == 'row':
+        axis = 1
+    elif row_or_col == 'col':
+        axis = 0
+    
+    return df.div(df.sum(axis=axis), axis=1-axis)
 
 
 def row_sum_df(df):
@@ -6010,19 +6064,18 @@ def get_mode_kde(data, bandwidth='scott', grid_size=1000):
         print_title('Error: Failed to estimate the mode using KDE, returning mean instead.')
         return np.nanmean(data)
 
-
+@to_be_improved
 def repeat_data(data, repeat_times):
     '''
     重复列表中的每个元素指定的次数。
 
     参数:
-    - data: 要重复的数据，可以是列表、numpy数组、字典、Pandas Series或DataFrame。
-    - repeat_times: 重复的次数，可以是整数、列表、numpy数组、字典、Pandas Series或DataFrame。
+    - data: 要重复的数据,可以是列表,numpy数组,字典,Pandas Series或DataFrame
+    - repeat_times: 重复的次数,可以是整数,列表,numpy数组,字典,Pandas Series或DataFrame
 
     返回:
-    - 所有重复后的元素。
+    - 所有重复后的元素
     '''
-    print('array 需要改善,dict series需要改善')
     # For lists and numpy arrays
     if isinstance(data, list):
         if isinstance(repeat_times, int):
@@ -6030,9 +6083,7 @@ def repeat_data(data, repeat_times):
         elif isinstance(repeat_times, (list, np.ndarray)) and len(data) == len(repeat_times):
             return [item for item, count in zip(data, repeat_times) for _ in range(count)]
     elif isinstance(data, np.ndarray):
-        if isinstance(repeat_times, int):
-            return np.repeat(data, repeat_times)
-        elif isinstance(repeat_times, (list, np.ndarray)):
+        if isinstance(repeat_times, (list, np.ndarray, int)):
             return np.repeat(data, repeat_times)
 
     # Handling dictionary data
@@ -6045,29 +6096,32 @@ def repeat_data(data, repeat_times):
                         [item for item in value for _ in range(repeat_times)])
                 else:
                     result.extend([value for _ in range(repeat_times)])
-        else:
+        elif isinstance(repeat_times, dict):
             for key, value in data.items():
                 if isinstance(value, list):
                     result.extend(
-                        [item for item in value for _ in range(repeat_times.get(key, 1))])
+                        [item for item in value for _ in range(repeat_times[key])])
                 else:
                     result.extend(
-                        [value for _ in range(repeat_times.get(key, 1))])
+                        [value for _ in range(repeat_times[key])])
         return result
 
     # Convert Series and DataFrame outputs to list or np.array using pandas.concat
-    if isinstance(data, pd.Series) and isinstance(repeat_times, (pd.Series, int)):
+    if isinstance(data, pd.Series):
         if isinstance(repeat_times, int):
             return data.repeat(repeat_times).tolist()
-        else:
+        elif isinstance(repeat_times, pd.Series):
             repeated_values = [pd.Series(
                 [value] * repeat_times.get(index, 1)) for index, value in data.items()]
             repeated_series = pd.concat(repeated_values).reset_index(drop=True)
             return repeated_series.tolist()
-    if isinstance(data, pd.DataFrame) and isinstance(repeat_times, int):
-        return data.loc[data.index.repeat(repeat_times)].to_numpy()
-
-    return None
+    if isinstance(data, pd.DataFrame):
+        if isinstance(repeat_times, int):
+            return data.loc[data.index.repeat(repeat_times)].to_numpy()
+        elif isinstance(repeat_times, pd.DataFrame):
+            data_flat = data.to_numpy().flatten()
+            repeats_flat = repeat_times.to_numpy().flatten().astype(int)
+            return np.repeat(data_flat, repeats_flat)
 # endregion
 
 
@@ -8313,7 +8367,7 @@ def merge_ax(axs, rm_mode='rm_axis', label='merge'):
         合并给定的轴对象列表或数组为一个轴对象。
 
         :param axs: 要合并的轴对象列表或数组
-        :param rm_mode: 是否删除原始的轴对象，默认为'rm_axis'，即删除原始的轴对象;假如为'rm_ax',则删除整个ax;如果是其他值,则不删除原始的轴对象
+        :param rm_mode: 是否删除原始的轴对象.默认为'rm_axis',即删除原始的轴对象;假如为'rm_ax',则删除整个ax;如果是其他值,则不删除原始的轴对象
     '''
     axs = get_iterable_ax(axs)
     for ax in axs:
@@ -9923,10 +9977,16 @@ def add_ax_tag(ax, tag, x=AX_TAG_POS[0], y=AX_TAG_POS[1], fontsize=TAG_SIZE, va=
     return add_text(ax, tag, x=x, y=y, fontsize=fontsize, va=va, ha=ha, **kwargs)
 
 
-def add_axes_dict_tag(axes_dict, tag_dict, **kwargs):
+def add_axes_dict_tag(axes_dict, tag_dict=None, **kwargs):
     '''
-    按照tag_dict的键值对，给axes_dict中的每个轴添加标签。
+    按照tag_dict的键值对,给axes_dict中的每个轴添加标签
+
+    参数:
+    - axes_dict: dict, 包含matplotlib的Axes对象的字典
+    - tag_dict: dict or None, 标签的字典,默认为None,表示使用axes_dict的键值对(即将axes_dict的key作为标签显示)
     '''
+    if tag_dict is None:
+        tag_dict = {ax_name: ax_name for ax_name in axes_dict.keys()}
     for ax_name, tag in tag_dict.items():
         add_ax_tag(axes_dict[ax_name], tag, **kwargs)
 
@@ -11640,6 +11700,30 @@ def rgb_to_rgba(rgb, alpha=1.0):
 
     # 返回 RGBA 颜色值
     return (r, g, b, alpha)
+
+
+def get_random_color(n, cmap=CMAP, seed=None):
+    '''
+    随意获取n个颜色
+    '''
+    if seed is None:
+        seed = get_time_seed()
+    rng = get_local_rng(seed)
+    colors = cmap(np.linspace(0, 1, n))
+    return rng.permutation(colors)
+
+
+def get_plt_color(n):
+    '''
+    获取matplotlib默认的颜色
+    '''
+    prop_cycler = plt.rcParams['axes.prop_cycle']
+    cycler_iterator = itertools.cycle(prop_cycler)
+    colors = []
+    for _ in range(n):
+        props = next(cycler_iterator)
+        colors.append(props['color'])
+    return colors
 # endregion
 
 
