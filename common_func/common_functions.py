@@ -281,7 +281,6 @@ LABEL_PAD = LABEL_SIZE/3     # label间距(间距的单位是字体大小)
 TITLE_PAD = TITLE_SIZE/3     # 标题间距(间距的单位是字体大小)
 TEXT_VA = 'top'
 TEXT_HA = 'left'
-# TEXT_KWARGS = {'verticalalignment': TEXT_VA, 'horizontalalignment': TEXT_HA, 'fontsize': FONT_SIZE, 'color': BLACK}
 # endregion
 
 # region 图形布局参数
@@ -2547,12 +2546,6 @@ def load_df(filename, index_col=0, index_dtype=str, col_dtype=str):
                 filename, index_col=index_col, engine='openpyxl')
         elif filename.endswith('.csv'):
             df = pd.read_csv(filename, index_col=index_col)
-        else:
-            for ext in ['.xlsx', '.csv', '.pkl', '.joblib', '.pickle']:
-                if os.path.exists(filename+ext):
-                    return load_df(filename+ext, index_col, index_dtype, col_dtype)
-            raise ValueError(
-                "Unsupported file extension. Please ensure the file is .csv, .xlsx")
 
         df.index = df.index.astype(index_dtype)
         df.columns = df.columns.astype(col_dtype)
@@ -2563,6 +2556,9 @@ def load_df(filename, index_col=0, index_dtype=str, col_dtype=str):
 
         return df
     else:
+        for ext in ['.xlsx', '.csv', '.pkl', '.joblib', '.pickle']:
+            if os.path.exists(filename+ext):
+                return load_df(filename+ext, index_col, index_dtype, col_dtype)
         raise ValueError(
             "File not found. Please check the file path and extension.")
 
@@ -2976,7 +2972,7 @@ def get_max_decimal_num(number_list, **kwargs):
 # endregion
 
 
-# region 字符串、filename处理相关函数
+# region 字符串,filename处理相关函数
 def format_text(text, text_process=None):
     '''
     格式化文本(主要是为了画图美观)
@@ -6064,7 +6060,7 @@ def get_mode_kde(data, bandwidth='scott', grid_size=1000):
         print_title('Error: Failed to estimate the mode using KDE, returning mean instead.')
         return np.nanmean(data)
 
-@to_be_improved
+
 def repeat_data(data, repeat_times):
     '''
     重复列表中的每个元素指定的次数。
@@ -6732,6 +6728,7 @@ def plt_hist(ax, data, bins=BIN_NUM, label=None, color=BLUE, stat='probability',
     :param kwargs: 其他plt.hist支持的参数
     '''
     hist, edge, mid_point = get_hist(data, bins, stat=stat)
+    set_ax(ax, ylabel=stat)
     return plt_bar(ax, mid_point, hist, label=label, color=color, width=edge[1]-edge[0], vert=vert, **kwargs)
 
 
@@ -9758,9 +9755,6 @@ def add_text(ax, text, x=TEXT_X, y=TEXT_Y, text_process=None, transform='ax', va
     elif transform == 'data':
         transform = ax.transData
 
-    # # 更新默认参数
-    # kwargs = update_dict(TEXT_KWARGS, kwargs)
-
     return ax.text(x, y, text, transform=transform, va=va, ha=ha, fontsize=fontsize, color=color, **kwargs)
 
 
@@ -9769,11 +9763,11 @@ def adjust_text(fig_or_ax, text, new_position=None, new_text=None, text_kwargs=N
     调整指定文本对象的文本,位置和对齐方式。
     
     参数:
-    - fig_or_ax: matplotlib的Figure或Axes对象，指定在哪里搜索文本对象。
-    - text: str, 要搜索和调整的文本内容。
-    - new_position: tuple, 新的位置，格式为(x, y)。
-    - new_text: str, 新的文本内容，默认为None,表示不修改文本内容。
-    - text_kwargs: dict, 传递给`text.update`的其他参数，默认为None。
+    - fig_or_ax: matplotlib的Figure或Axes对象,指定在哪里搜索文本对象
+    - text: str, 要搜索和调整的文本内容
+    - new_position: tuple, 新的位置,格式为(x, y)
+    - new_text: str, 新的文本内容,默认为None,表示不修改文本内容
+    - text_kwargs: dict, 传递给'text.update'的其他参数,默认为None
 
     注意:
     改变位置时,坐标的ha,va,transform等属性和原先一样(除非指定了新的text_kwargs)
@@ -9947,15 +9941,15 @@ def align_text_obj(text_obj_list, ref_text_obj, ref_ax=None, ha_align_mode='left
 # region 初级作图函数(添加tag)
 def add_fig_tag(fig, tag, x=FIG_TAG_POS[0], y=FIG_TAG_POS[1], fontsize=TAG_SIZE, va=TAG_VA, ha=TAG_HA, **kwargs):
     '''
-    在指定位置添加图的标签。
-    :param fig: matplotlib的图对象，用于绘制图形。
-    :param tag: 标签的文本。
-    :param x: 标签的x坐标，默认为FIG_TAG_POS[0]。
-    :param y: 标签的y坐标，默认为FIG_TAG_POS[1]。
-    :param fontsize: 标签的字体大小，默认为SUP_TITLE_SIZE。
-    :param va: 标签的垂直对齐方式，默认为TAG_VA。
-    :param ha: 标签的水平对齐方式，默认为TAG_HA。
-    :param kwargs: 传递给`fig.text`的额外关键字参数。
+    在指定位置添加图的标签
+    :param fig: matplotlib的图对象,用于绘制图形
+    :param tag: 标签的文本
+    :param x: 标签的x坐标,默认为FIG_TAG_POS[0]
+    :param y: 标签的y坐标,默认为FIG_TAG_POS[1]
+    :param fontsize: 标签的字体大小,默认为SUP_TITLE_SIZE
+    :param va: 标签的垂直对齐方式,默认为TAG_VA
+    :param ha: 标签的水平对齐方式,默认为TAG_HA
+    :param kwargs: 传递给'fig.text'的额外关键字参数
     '''
     # 画图
     return fig.text(x, y, tag, fontsize=fontsize, va=va, ha=ha, **kwargs)
@@ -9963,42 +9957,59 @@ def add_fig_tag(fig, tag, x=FIG_TAG_POS[0], y=FIG_TAG_POS[1], fontsize=TAG_SIZE,
 
 def add_ax_tag(ax, tag, x=AX_TAG_POS[0], y=AX_TAG_POS[1], fontsize=TAG_SIZE, va=TAG_VA, ha=TAG_HA, **kwargs):
     '''
-    在指定位置添加轴的标签。
-    :param ax: matplotlib的轴对象，用于绘制图形。
-    :param tag: 标签的文本。
-    :param x: 标签的x坐标，默认为AX_TAG_POS[0]。
-    :param y: 标签的y坐标，默认为AX_TAG_POS[1]。
-    :param fontsize: 标签的字体大小，默认为TITLE_SIZE。
-    :param va: 标签的垂直对齐方式，默认为TAG_VA。
-    :param ha: 标签的水平对齐方式，默认为TAG_HA。
-    :param kwargs: 传递给`ax.text`的额外关键字参数。
+    在指定位置添加轴的标签
+    :param ax: matplotlib的轴对象,用于绘制图形
+    :param tag: 标签的文本
+    :param x: 标签的x坐标,默认为AX_TAG_POS[0]
+    :param y: 标签的y坐标,默认为AX_TAG_POS[1]
+    :param fontsize: 标签的字体大小,默认为TITLE_SIZE
+    :param va: 标签的垂直对齐方式,默认为TAG_VA
+    :param ha: 标签的水平对齐方式,默认为TAG_HA
+    :param kwargs: 传递给'ax.text'的额外关键字参数
     '''
     # 画图
     return add_text(ax, tag, x=x, y=y, fontsize=fontsize, va=va, ha=ha, **kwargs)
 
 
-def add_axes_dict_tag(axes_dict, tag_dict=None, **kwargs):
+def add_ax_tag_by_ref_ax(ax, tag, ref_ax, x=AX_TAG_POS[0], y=AX_TAG_POS[1], fontsize=TAG_SIZE, va=TAG_VA, ha=TAG_HA, **kwargs):
+    '''
+    在指定位置添加轴的标签,参考另一个轴的位置
+    '''
+    if x > 0:
+        raise ValueError("x should be less than 0")
+    if y < 1:
+        raise ValueError("y should be greater than 1")
+    if ref_ax is not None:
+        ref_ax_width, ref_ax_height = get_ax_size(ref_ax)
+        ax_width, ax_height = get_ax_size(ax)
+        x = x * ref_ax_width / ax_width
+        y = (y - 1) * ref_ax_height / ax_height + 1
+    return add_ax_tag(ax, tag, x=x, y=y, fontsize=fontsize, va=va, ha=ha, **kwargs)
+
+
+def add_axes_dict_tag(axes_dict, tag_dict=None, ref_ax=None, **kwargs):
     '''
     按照tag_dict的键值对,给axes_dict中的每个轴添加标签
 
     参数:
     - axes_dict: dict, 包含matplotlib的Axes对象的字典
     - tag_dict: dict or None, 标签的字典,默认为None,表示使用axes_dict的键值对(即将axes_dict的key作为标签显示)
+    - ref_ax: matplotlib的Axes对象,用于参考位置,默认为None,表示不参考位置
     '''
     if tag_dict is None:
         tag_dict = {ax_name: ax_name for ax_name in axes_dict.keys()}
     for ax_name, tag in tag_dict.items():
-        add_ax_tag(axes_dict[ax_name], tag, **kwargs)
+        add_ax_tag_by_ref_ax(axes_dict[ax_name], tag, ref_ax, **kwargs)
 
 
-def add_axes_list_tag_by_order(axes_list, tag_kwargs=None, **kwargs):
+def add_axes_list_tag_by_order(axes_list, tag_kwargs=None, ref_ax=None, **kwargs):
     '''
     按照顺序加a,b,c...标签。
     '''
     tag_kwargs = update_dict({}, tag_kwargs)
     tag_list = get_tag(len(axes_list), **tag_kwargs)
     for i, ax in enumerate(axes_list):
-        add_ax_tag(ax, tag_list[i], **kwargs)
+        add_ax_tag_by_ref_ax(ax, tag_list[i], ref_ax, **kwargs)
 # endregion
 
 
@@ -11297,11 +11308,11 @@ def read_sns():
     print('please see sns gallery and add new function')
 # endregion
 
-    
+
 # region 复杂作图函数(sns系列,输入向量使用)
 def sns_band_line(ax, x, y, band_width, label=None, color=BLUE, alpha=FAINT_ALPHA, **kwargs):
     '''
-    使用x和y绘制折线图，并添加一个表示误差带的区域
+    使用x和y绘制折线图,并添加一个表示误差带的区域
     :param ax: matplotlib的轴对象,用于绘制图形
     :param x: x轴的数据
     :param y: y轴的数据
@@ -12653,6 +12664,8 @@ def suitable_tick_size(num_ticks, plt_size, tick_size=TICK_SIZE, proportion=TICK
     '''
     Adjusts the font size of the tick labels based on the number of ticks and the size of the axis.
     '''
+    if num_ticks == 0:
+        return tick_size
     suitable_tick_size = inch_to_point(plt_size) / num_ticks * proportion
     return min(suitable_tick_size, tick_size)
 
@@ -13434,6 +13447,197 @@ def get_gs_inside_gs(gs, index=None, nrows=1, ncols=1, wspace=None, hspace=None,
     sub_gs = get_gs_inside_ax(ax, nrows=nrows, ncols=ncols, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios)
     rm_ax(ax)
     return sub_gs
+# endregion
+
+
+# region 通用函数(创建visualizer)
+class SingleVisualizer:
+    '''
+    快捷的可视化单个对象
+    '''
+    def __init__(self, title):
+        self.title = title
+
+
+class MultiVisualizer:
+    '''
+    快捷的可视化多个对象
+    '''
+    def __init__(self, single_visualizer_list):
+        self.title_list = [single_visualizer.title for single_visualizer in single_visualizer_list]
+        self.single_visualizer_list = single_visualizer_list
+        self.num = len(single_visualizer_list)
+
+    def get_fig_subfig_ax(self, subfig_nrows, subfig_ncols, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
+        '''
+        获取fig和ax
+
+        参数:
+        subfig_nrows, subfig_ncols: 行数和列数(对于subfig而言,如果separate为True,则nrows和ncols无效)
+        separate: True,则每个对象一个fig;False,每个对象一个subfig,但是所有对象一个fig
+        '''
+        self.subfig_nrows = subfig_nrows
+        self.subfig_ncols = subfig_ncols
+        self.separate = separate
+        self.subfig_dict = {}
+        self.ax_dict = {}
+        get_suitable_fig_size_kwargs = update_dict({}, get_suitable_fig_size_kwargs)
+        get_fig_subfig_kwargs = update_dict({}, get_fig_subfig_kwargs)
+        get_ax_kwargs = update_dict({}, get_ax_kwargs)
+        self.ax_nrows = get_ax_kwargs.get('nrows', 1)
+        self.ax_ncols = get_ax_kwargs.get('ncols', 1)
+
+        subfig_width, subfig_height = get_suitable_fig_size(**get_suitable_fig_size_kwargs)
+
+        if separate:
+            for title in self.title_list:
+                self.subfig_dict[title] = get_fig(subfig_width, subfig_height)
+                self.ax_dict[title] = get_ax(fig=self.subfig_dict[title], **get_ax_kwargs)
+        else:
+            self.fig, subfig = get_fig_subfig(nrows=subfig_nrows, ncols=subfig_ncols, subfig_width=subfig_width, subfig_height=subfig_height, **get_fig_subfig_kwargs)
+            subfig = subfig.flatten()
+            for i, title in enumerate(self.title_list):
+                self.subfig_dict[title] = subfig[i]
+                self.ax_dict[title] = get_ax(fig=self.subfig_dict[title], **get_ax_kwargs)
+
+        return self.subfig_dict, self.ax_dict
+
+    def add_tag(self):
+        '''
+        添加tag
+
+        注意:
+        如果希望以自定义的顺序添加tag,可以自行使用add_axes_list_tag_by_order
+        '''
+        if self.separate:
+            for ax in self.ax_dict.values():
+                add_axes_list_tag_by_order(ax)
+        else:
+            ax_in_order = []
+            for title in self.title_list:
+                ax_in_order.append(self.ax_dict[title].flatten())
+            ax_in_order = np.array(ax_in_order).flatten()
+            add_axes_list_tag_by_order(ax_in_order)
+
+    def add_subfig_title(self):
+        '''
+        为每个subfig添加标题
+        '''
+        for title, subfig in self.subfig_dict.items():
+            set_fig_title(subfig, title)
+
+    def add_rounded_rectangle():
+        pass
+
+    def multi_ax_plot(self, func_list, kwargs_list):
+        '''
+        在多个ax上作图
+        '''
+        for func, kwargs in zip(func_list, kwargs_list):
+            func(**kwargs)
+    
+    def multi_ax_plot_by_single_visualizer(self, func_name, kwargs_list):
+        '''
+        通过SingleVisualizer的方法在多个ax上作图
+        '''
+        func_list = [getattr(single_visualizer, func_name) for single_visualizer in self.single_visualizer_list]
+        self.multi_ax_plot(func_list, kwargs_list)
+
+    def update_save_fig_kwargs(self, save_fig_kwargs):
+        '''
+        更新save_fig_kwargs
+        '''
+        self.save_fig_kwargs = update_dict({}, save_fig_kwargs)
+
+    def save_fig(self, filename, save_fig_kwargs=None):
+        '''
+        保存fig
+        '''
+        save_fig_kwargs = update_dict(self.save_fig_kwargs, save_fig_kwargs)
+        if self.separate:
+            for title in self.title_list:
+                save_fig(self.subfig_dict[title], filename+'_'+title, **save_fig_kwargs)
+        else:
+            save_fig(self.fig, filename, **save_fig_kwargs)
+
+
+class MultiVisualizerByRow(MultiVisualizer):
+    '''
+    快捷的可视化多个对象,按行排列
+
+    注意:
+    仅仅支持每个subfig内部的ax只有一行
+    '''
+    def __init__(self, single_visualizer_list):
+        super().__init__(single_visualizer_list)
+    
+    def rm_redundant_xylabel(self):
+        '''
+        去掉多余的xy标签
+        '''
+        if self.separate:
+            pass
+        else:
+            for row, ax in enumerate(self.ax_dict.values()):
+                if row != 0:
+                    for col in range(1, self.ax_ncols):
+                        ax[col].set_xlabel('')
+
+    def get_fig_subfig_ax(self, subfig_ncols=1, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
+        '''
+        使用父类,但是自动设定nrows
+        '''
+        return super().get_fig_subfig_ax(self.num, subfig_ncols, separate, get_suitable_fig_size_kwargs, get_fig_subfig_kwargs, get_ax_kwargs)
+
+
+class MultiVisualizerByCol(MultiVisualizer):
+    '''
+    快捷的可视化多个对象,按列排列
+
+    注意:
+    仅仅支持每个subfig内部的ax只有一列
+    '''
+    def __init__(self, single_visualizer_list):
+        super().__init__(single_visualizer_list)
+    
+    def rm_redundant_xylabel(self):
+        '''
+        去掉多余的xy标签
+        '''
+        if self.separate:
+            pass
+        else:
+            for col, ax in enumerate(self.ax_dict.values()):
+                if col != 0:
+                    for row in range(self.ax_nrows):
+                        ax[row].set_ylabel('')
+
+    def add_tag(self, row_first=True):
+        '''
+        添加tag
+
+        注意:
+        row_first为True,则按行添加tag;False,则按列添加tag
+        row_first要求subfig内部的ax只有一列
+        '''
+        if row_first:
+            if self.separate:
+                for ax in self.ax_dict.values():
+                    add_axes_list_tag_by_order(ax)
+            else:
+                ax_in_order = []
+                for title in self.title_list:
+                    ax_in_order.append(self.ax_dict[title].flatten())
+                ax_in_order = np.array(ax_in_order).T.flatten()
+                add_axes_list_tag_by_order(ax_in_order)
+        else:
+            super().add_tag()
+    
+    def get_fig_subfig_ax(self, subfig_nrows=1, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
+        '''
+        使用父类,但是自动设定ncols
+        '''
+        return super().get_fig_subfig_ax(subfig_nrows, self.num, separate, get_suitable_fig_size_kwargs, get_fig_subfig_kwargs, get_ax_kwargs)
 # endregion
 
 
