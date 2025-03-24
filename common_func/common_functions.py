@@ -299,9 +299,9 @@ SAVEFIG_PKL = False
 CMAP = plt.cm.viridis
 HEATMAP_CMAP = plt.cm.jet
 DENSITY_CMAP = mcolors.LinearSegmentedColormap.from_list("density_cmap", [RANA, BLUE])
-CONTRAST_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_cmap", [FERRARI, WHITE, REDBULL])
-CONTRAST_WITH_MID_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_with_mid_cmap", [FERRARI, (0.5, 0.6, 0.4), REDBULL])
-CONTRAST_GRAY_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_gray_cmap", [FERRARI, RANA, REDBULL])
+CONTRAST_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_cmap", [REDBULL, WHITE, FERRARI])
+CONTRAST_WITH_MID_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_with_mid_cmap", [REDBULL, (0.5, 0.6, 0.4), FERRARI])
+CONTRAST_GRAY_CMAP = mcolors.LinearSegmentedColormap.from_list("contrast_gray_cmap", [REDBULL, RANA, FERRARI])
 RGB_CMAP = mcolors.LinearSegmentedColormap.from_list("rgb_cmap", ['#FF0000', '#00FF00', '#0000FF'])
 MARS_CMAP = mcolors.LinearSegmentedColormap.from_list("mars_cmap", [MERCEDES, FERRARI, REDBULL])
 OCEAN_CMAP = mcolors.LinearSegmentedColormap.from_list("ocean_cmap", ['#FF7F46', '#FFDC87', '#B3E5EF', '#59CCE3', '#49A8D0', '#0C5582'])
@@ -3355,6 +3355,11 @@ def filter_dict(d, keys):
     return {k: d[k] for k in keys if k in d}
 
 
+def get_sub_dict(d, keys):
+    '''获取字典的子集,仅仅是filter_dict的别名'''
+    return filter_dict(d, keys)
+
+
 def update_dict(original_dict, new_dict):
     '''更新字典'''
     if new_dict is None:
@@ -4473,6 +4478,9 @@ def process_nan(data, nan_policy=NAN_POLICY, fill_value=0):
 
 
 def process_special_value(data, nan_policy=NAN_POLICY, fill_value=0, inf_policy=INF_POLICY):
+    '''
+    处理数据中的NaN和inf值
+    '''
     data = process_inf(data, inf_policy=inf_policy)  # Process inf values first
     data = process_nan(data, nan_policy=nan_policy,
                        fill_value=fill_value)  # Process NaN values
@@ -4480,6 +4488,9 @@ def process_special_value(data, nan_policy=NAN_POLICY, fill_value=0, inf_policy=
 
 
 def sync_special_value(*args, inf_policy=INF_POLICY):
+    '''
+    同步多个输入数据中的NaN和inf值
+    '''
     # Verify that all inputs have the same shape
     shapes = [a.shape if isinstance(
         a, (np.ndarray, pd.Series, pd.DataFrame)) else len(a) for a in args]
@@ -4509,13 +4520,16 @@ def sync_special_value(*args, inf_policy=INF_POLICY):
         elif isinstance(original_arg, pd.DataFrame):
             args_synced.append(pd.DataFrame(
                 synced_arg, index=original_arg.index, columns=original_arg.columns))
-        else:  # numpy array
+        elif isinstance(original_arg, np.ndarray):
             args_synced.append(synced_arg)
 
     return args_synced if len(args_synced) > 1 else args_synced[0]
 
 
 def sync_special_value_along_axis(data, sync_axis=0, inf_policy=INF_POLICY):
+    '''
+    同步多维数据中的NaN和inf值沿着指定的轴
+    '''
     # Input verification
     if not isinstance(data, (np.ndarray, pd.DataFrame, list)):
         raise ValueError("Data must be a numpy array, a list or a pandas DataFrame")
@@ -6717,7 +6731,7 @@ def plt_box(ax, x, y, width=BAR_WIDTH, label=None, patch_artist=True, boxprops=N
 
 def plt_hist(ax, data, bins=BIN_NUM, label=None, color=BLUE, stat='probability', vert=True, **kwargs):
     '''
-    使用数据绘制直方图,可以接受plt.hist的其他参数(不推荐使用,推荐使用sns_hist)
+    使用数据绘制直方图,可以接受plt.hist的其他参数
     :param ax: matplotlib的轴对象,用于绘制图形
     :param data: 用于绘制直方图的数据集
     :param bins: 直方图的箱数,默认为None,自动确定箱数
@@ -6727,9 +6741,29 @@ def plt_hist(ax, data, bins=BIN_NUM, label=None, color=BLUE, stat='probability',
     :param vert: 是否为垂直直方图,默认为True,即纵向
     :param kwargs: 其他plt.hist支持的参数
     '''
-    hist, edge, mid_point = get_hist(data, bins, stat=stat)
-    set_ax(ax, ylabel=stat)
-    return plt_bar(ax, mid_point, hist, label=label, color=color, width=edge[1]-edge[0], vert=vert, **kwargs)
+    plt_hist_instance = PltHist(ax, data, bins=bins, label=label, color=color, stat=stat, vert=vert, **kwargs)
+    return plt_hist_instance.bar
+
+
+class PltHist:
+    '''
+    用于绘制直方图的类(方便后续获取hist,edge,mid_point等)
+    '''
+    def __init__(self, ax, data, bins=BIN_NUM, label=None, color=BLUE, stat='probability', vert=True, **kwargs):
+        '''
+        使用数据绘制直方图,可以接受plt.hist的其他参数
+        :param ax: matplotlib的轴对象,用于绘制图形
+        :param data: 用于绘制直方图的数据集
+        :param bins: 直方图的箱数,默认为None,自动确定箱数
+        :param label: 图例标签,默认为None
+        :param color: 直方图的颜色,默认为BLUE
+        :param stat: 直方图的统计方法,默认为'probability'
+        :param vert: 是否为垂直直方图,默认为True,即纵向
+        :param kwargs: 其他plt.hist支持的参数
+        '''
+        self.hist, self.edge, self.mid_point = get_hist(data, bins, stat=stat)
+        set_ax(ax, ylabel=stat)
+        self.bar = plt_bar(ax, self.mid_point, self.hist, label=label, color=color, width=self.edge[1]-self.edge[0], vert=vert, **kwargs)
 
 
 def plt_hist_2d(ax, x, y, x_bins=BIN_NUM, y_bins=BIN_NUM, cmap=DENSITY_CMAP, label=None, stat='probability', cbar=True, cbar_position=None, cbar_label='stat', cbar_kwargs=None, vmin=None, vmax=None, **kwargs):
@@ -6991,6 +7025,18 @@ def plt_pcolormesh(ax, vertical_line_pos, horizontal_line_pos, data, cmap=CMAP, 
     假如data的shape为(N_row, N_col),那么vertical_line_pos的shape应该为(N_col+1,),horizontal_line_pos的shape应该为(N_row+1,);在需要的时候,也很有可能需要转置data
     '''
     return ax.pcolormesh(vertical_line_pos, horizontal_line_pos, data, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax, **kwargs)
+# endregion
+
+
+# region 初级作图函数(matplotlib系列,输入dict)
+def plt_bar_dict(ax, data, label=None, color=BLUE, width=BAR_WIDTH, vert=True, **kwargs):
+    '''
+    使用字典数据绘制柱状图
+    '''
+    x = range(len(data))
+    y = list(data.values())
+    set_ax(ax, xtick=x, xtick_label=list(data.keys()))
+    return plt_bar(ax, x, y, label=label, color=color, width=width, vert=vert, **kwargs)
 # endregion
 
 
@@ -8713,7 +8759,7 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, ticks=None, tick_labels=None, dis
     :param ax: matplotlib的轴对象，用于绘制图形。
     :param mappable: 用于绘制颜色条的对象，默认为None。
     :param cmap: 颜色条的颜色映射，默认为CMAP。可以是离散的或连续的，须与discrete参数相符合。
-    :param ticks: 颜色条的刻度，默认为None,自动设置;如果输入了,则会使用输入的刻度
+    :param ticks: 颜色条的刻度,默认为None,自动设置(当不想显示tick的时候可以输入[]);如果输入了,则会使用输入的刻度
     :param tick_labels: 颜色条的刻度标签，默认为None,自动设置;如果输入了,则会使用输入的刻度标签
     :param discrete: 是否为离散颜色条，默认为False。
     :param discrete_num: 离散颜色条的数量，默认为5。
@@ -9520,7 +9566,7 @@ def add_patch(ax, patch, auto_scale=True):
         ax.autoscale_view()
 
 
-def add_path_patch(ax, vertices, codes=None, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+def add_path_patch(ax, vertices, codes=None, facecolor='none', edgecolor=BLACK, auto_scale=True, lw=LINE_WIDTH, **kwargs):
     '''
     利用path创建patch。
 
@@ -9531,12 +9577,12 @@ def add_path_patch(ax, vertices, codes=None, facecolor='none', edgecolor=BLACK, 
     - edgecolor: 边框颜色,默认为BLACK
     - auto_scale: 是否自动调整坐标轴范围,默认为True
     '''
-    p = mpatches.PathPatch(mpl.path.Path(vertices, codes), facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    p = mpatches.PathPatch(mpl.path.Path(vertices, codes), facecolor=facecolor, edgecolor=edgecolor, lw=lw, **kwargs)
     add_patch(ax, p, auto_scale=auto_scale)
     return p
 
 
-def add_polygon_patch(ax, xy, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+def add_polygon_patch(ax, xy, facecolor='none', edgecolor=BLACK, auto_scale=True, lw=LINE_WIDTH, **kwargs):
     '''
     创建多边形patch。
 
@@ -9546,12 +9592,12 @@ def add_polygon_patch(ax, xy, facecolor='none', edgecolor=BLACK, auto_scale=True
     - edgecolor: 边框颜色,默认为BLACK
     - auto_scale: 是否自动调整坐标轴范围,默认为True
     '''
-    p = mpatches.Polygon(xy, facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    p = mpatches.Polygon(xy, facecolor=facecolor, edgecolor=edgecolor, lw=lw, **kwargs)
     add_patch(ax, p, auto_scale=auto_scale)
     return p
 
 
-def add_circle_patch(ax, center, radius, facecolor='none', edgecolor=BLACK, auto_scale=True, **kwargs):
+def add_circle_patch(ax, center, radius, facecolor='none', edgecolor=BLACK, auto_scale=True, lw=LINE_WIDTH, **kwargs):
     '''
     创建圆形patch。
 
@@ -9562,7 +9608,25 @@ def add_circle_patch(ax, center, radius, facecolor='none', edgecolor=BLACK, auto
     - edgecolor: 边框颜色,默认为BLACK
     - auto_scale: 是否自动调整坐标轴范围,默认为True
     '''
-    p = mpatches.Circle(center, radius, facecolor=facecolor, edgecolor=edgecolor, **kwargs)
+    p = mpatches.Circle(center, radius, facecolor=facecolor, edgecolor=edgecolor, lw=lw, **kwargs)
+    add_patch(ax, p, auto_scale=auto_scale)
+    return p
+
+
+def add_arc_patch(ax, center, radius, theta1, theta2, facecolor='none', edgecolor=BLACK, auto_scale=True, lw=LINE_WIDTH, angle_type='rad', **kwargs):
+    '''
+    创建圆弧patch
+
+    angle_type: 角度类型,默认为'rad',即弧度制.可选'rad'或'deg'
+    '''
+    if angle_type == 'rad':
+        theta1 = np.rad2deg(theta1)
+        theta2 = np.rad2deg(theta2)
+    elif angle_type == 'deg':
+        pass
+    else:
+        raise ValueError("angle_type must be 'rad' or 'deg'")
+    p = mpatches.Arc(center, 2*radius, 2*radius, theta1=theta1, theta2=theta2, facecolor=facecolor, edgecolor=edgecolor, lw=lw, **kwargs)
     add_patch(ax, p, auto_scale=auto_scale)
     return p
 # endregion
@@ -13467,6 +13531,14 @@ class MultiVisualizer:
         self.title_list = [single_visualizer.title for single_visualizer in single_visualizer_list]
         self.single_visualizer_list = single_visualizer_list
         self.num = len(single_visualizer_list)
+    
+    def get_single_visualizer(self, title):
+        '''
+        获取单个visualizer
+        '''
+        for single_visualizer in self.single_visualizer_list:
+            if single_visualizer.title == title:
+                return single_visualizer
 
     def get_fig_subfig_ax(self, subfig_nrows, subfig_ncols, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
         '''
@@ -13502,7 +13574,7 @@ class MultiVisualizer:
 
         return self.subfig_dict, self.ax_dict
 
-    def add_tag(self):
+    def add_tag(self, **kwargs):
         '''
         添加tag
 
@@ -13511,20 +13583,20 @@ class MultiVisualizer:
         '''
         if self.separate:
             for ax in self.ax_dict.values():
-                add_axes_list_tag_by_order(ax)
+                add_axes_list_tag_by_order(ax, **kwargs)
         else:
             ax_in_order = []
             for title in self.title_list:
                 ax_in_order.append(self.ax_dict[title].flatten())
             ax_in_order = np.array(ax_in_order).flatten()
-            add_axes_list_tag_by_order(ax_in_order)
+            add_axes_list_tag_by_order(ax_in_order, **kwargs)
 
-    def add_subfig_title(self):
+    def add_subfig_title(self, **kwargs):
         '''
         为每个subfig添加标题
         '''
         for title, subfig in self.subfig_dict.items():
-            set_fig_title(subfig, title)
+            set_fig_title(subfig, title, **kwargs)
 
     def add_rounded_rectangle():
         pass
@@ -13612,7 +13684,7 @@ class MultiVisualizerByCol(MultiVisualizer):
                     for row in range(self.ax_nrows):
                         ax[row].set_ylabel('')
 
-    def add_tag(self, row_first=True):
+    def add_tag(self, row_first=True, **kwargs):
         '''
         添加tag
 
@@ -13623,15 +13695,15 @@ class MultiVisualizerByCol(MultiVisualizer):
         if row_first:
             if self.separate:
                 for ax in self.ax_dict.values():
-                    add_axes_list_tag_by_order(ax)
+                    add_axes_list_tag_by_order(ax, **kwargs)
             else:
                 ax_in_order = []
                 for title in self.title_list:
                     ax_in_order.append(self.ax_dict[title].flatten())
                 ax_in_order = np.array(ax_in_order).T.flatten()
-                add_axes_list_tag_by_order(ax_in_order)
+                add_axes_list_tag_by_order(ax_in_order, **kwargs)
         else:
-            super().add_tag()
+            super().add_tag(**kwargs)
     
     def get_fig_subfig_ax(self, subfig_nrows=1, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
         '''
