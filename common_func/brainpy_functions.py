@@ -11,6 +11,8 @@ from math import ceil
 from multiprocessing import Process
 from pathlib import Path
 from typing import Union, Sequence, Callable, Optional
+import abc
+from collections import defaultdict
 
 
 # 数学和科学计算库
@@ -62,32 +64,27 @@ import common_functions as cf
 # region 定义默认参数
 E_COLOR = cf.RED
 I_COLOR = cf.BLUE
-BP_VERSION = '2.5.0'
-if bp.__version__ != BP_VERSION:
-    cf.print_sep()
-    cf.print_title('please check the brainpy version', char='*')
-    print('current brainpy version: {}'.format(bp.__version__))
-    print('default brainpy version: {}'.format(BP_VERSION))
-    cf.print_sep()
+cf.print_title('brainpy version: {}'.format(bp.__version__), char='*')
 # endregion
 
 
 # region brainpy使用说明
 def brainpy_data_structure():
-    return '所有数据按照(T, N)的形式存储，其中T表示时间点的数量，N表示神经元的数量。'
+    return '所有数据按照(T, N)的形式存储,其中T表示时间点的数量,N表示神经元的数量'
 
 
 def brainpy_unit(physical_quantity):
     '''
-    Note that nA * MOhm = mV, thus consistent with for example \tau * dV/dt = - ( V - V_rest ) + R * I
+    Note that pA * GOhm = mV, thus consistent with for example \tau * dV/dt = - ( V - V_rest ) + R * I
     '''
     if physical_quantity == 'V':
         return 'mV (10^-3 V)'
-    # 这两个可能不对
-    # if physical_quantity == 'I':
-    #     return 'nA (10^-9 A)'
-    # if physical_quantity == 'R':
-    #     return 'MOhm (10^6 Ohm)'
+    if physical_quantity == 'I':
+        return 'pA (10^-12 A)'
+    if physical_quantity == 'R':
+        return 'GOhm (10^9 Ohm)'
+    if physical_quantity == 'g':
+        return 'nS (10^-9 S)'
     if physical_quantity == 'tau':
         return 'ms (10^-3 s)'
 # endregion
@@ -105,6 +102,7 @@ def get_LifRef_param(paper):
         E_params = {'V_th': -50.0, 'V_reset': -55.0, 'V_rest':-70.0, 'tau_ref': 2.0, 'R': 0.04, 'tau': 20.0, 'V_initializer': bp.init.OneInit(-70.)}
         I_params = {'V_th': -50.0, 'V_reset': -55.0, 'V_rest':-70.0, 'tau_ref': 1.0, 'R': 0.05, 'tau': 10.0, 'V_initializer': bp.init.OneInit(-70.)}
     return E_params, I_params
+
 
 def get_synapse_and_params(mode):
     if mode == 'Liang_2020_Frontiers_Fast':
@@ -129,19 +127,6 @@ def get_synapse_and_params(mode):
         synapse = {'E2E': NormalizedExponCOBA, 'I2E': NormalizedExponCOBA, 'E2I': NormalizedExponCOBA, 'I2I': NormalizedExponCOBA}
         synapse_params = {'E2E': {'tau': 4.0, 'delay': 0.0, 'E': 0.0, 'out_label': 'E'}, 'E2I': {'tau': 4.0, 'delay': 0.0, 'E': 0.0, 'out_label': 'E'}, 'I2E': {'tau': 14.0, 'delay': 0.0, 'E': -70.0, 'out_label': 'I'}, 'I2I': {'tau': 14.0, 'delay': 0.0, 'E': -70.0, 'out_label': 'I'}}
     return synapse, synapse_params
-
-
-# def get_inp_param(paper):
-#     if paper == 'Liang_2020_Frontiers':
-#         E_inp_rate = 5.0
-#         E_inp_num = 8000
-#         E_inp_prob = 0.2
-#         E_inp_weight = 0.45
-#         I_inp_rate = 5.0
-#         I_inp_num = 8000
-#         I_inp_prob = 0.2
-#         I_inp_weight = 0.72
-#         return {'E': {'type': 'dualexpon_poisson', 'rate': E_inp_rate, 'num': E_inp_num, 'prob': E_inp_prob, 'weight': E_inp_weight, 'tau_rise': synapse_params['E2E']['tau_rise'], 'tau_decay': synapse_params['E2E']['tau_decay']}, 'I': {'type': 'dualexpon_poisson', 'rate': I_inp_rate, 'num': I_inp_num, 'prob': I_inp_prob, 'weight': I_inp_weight, 'tau_rise': synapse_params['E2E']['tau_rise'], 'tau_decay': synapse_params['E2E']['tau_decay']}}
 # endregion
 
 
@@ -161,6 +146,10 @@ def neuron_idx_data(data, indices=None, keep_size=False):
         return data[:, indices]
 
 
+def get_neuron_num_from_data(data):
+    return data.shape[1]
+
+
 def time_idx_data(data, indices=None, keep_size=False):
     '''
     从spike或者V中提取指定时间点的数据。indices可以是slice对象或单个值。
@@ -174,6 +163,10 @@ def time_idx_data(data, indices=None, keep_size=False):
         return data[[indices], :]
     else:
         return data[indices, :]
+
+
+def get_time_point_from_data(data):
+    return data.shape[0]
 # endregion
 
 
@@ -923,34 +916,6 @@ def casual_spike_video(E_monitored_neuron, I_monitored_neuron, E_spike, E_pos, I
 
 
 # region neuron
-class EILifRef(bp.dyn.LifRefLTC):
-    '''
-    EI_inp分别考虑的LIF模型
-    '''
-    def derivative(self, V, t, I):
-        return (-V + self.V_rest + self.R * I) / self.tau
-
-    def update(self, x=None):
-        x = 0. if x is None else x
-        E_inp = self.sum_current_inputs(self.V.value, init=0, label='E')
-        I_inp = self.sum_current_inputs(self.V.value, init=0, label='I')
-        x = E_inp + I_inp + x
-        return super().update(x)
-
-
-class externalLifRef(bp.dyn.LifRefLTC):
-    '''
-    EI_inp分别考虑的LIF模型
-    '''
-    def derivative(self, V, t, I):
-        return (-V + self.V_rest + self.R * I) / self.tau
-
-    def update(self, x=None):
-        x = 0. if x is None else x
-        external_inp = self.sum_current_inputs(self.V.value, init=0, label='external') + x
-        internal_inp = self.sum_current_inputs(self.V.value, init=0, label='internal')
-        x = external_inp + internal_inp
-        return super().update(x)
 # endregion
 
 
@@ -1255,6 +1220,7 @@ def edr_connection(src_pos, tar_pos, LAM):
     random_num = np.random.rand(*prob.shape)
     return csr_matrix(prob > random_num)
 
+
 @cf.not_recommend
 def edr_conn(src_pos, tar_pos, LAM):
     '''
@@ -1268,281 +1234,188 @@ def edr_conn(src_pos, tar_pos, LAM):
 
 
 # region 神经元网络模型运行
-# 停用，并且注意这里的poisson不太对，不是delta的形式
-# def get_input_i(net, inp_kwargs, dt, i):
-#     '''
-#     注意:
-#         rate以Hz为单位,而dt以ms为单位,所以需要rate * dt / 1000
-#     '''
-#     inp = {}
-#     for g, g_inp_kwargs in inp_kwargs.items():
-#         input_type = g_inp_kwargs['type']
-#         if input_type == 'constant':
-#             inp[g] = g_inp_kwargs['mean']
-#         if input_type == 'wiener':
-#             inp[g] = np.random.randn(*(net.neuron[g].size))*g_inp_kwargs['std'] + g_inp_kwargs['mean']
-#         if input_type == 'poisson':
-#             p = g_inp_kwargs['rate'] * dt / 1000
-#             inp[g] = np.random.binomial(1, p, size=net.neuron[g].size) * g_inp_kwargs['amplitude']
-#         if input_type == 'multiple_poisson':
-#             p = g_inp_kwargs['rate'] * dt / 1000
-#             inp[g] = np.random.binomial(g_inp_kwargs['num'], p, size=net.neuron[g].size) * g_inp_kwargs['amplitude']
-#         if input_type == 'approximate_multiple_poisson':
-#             p = g_inp_kwargs['rate'] * dt / 1000
-#             inp[g] = np.random.normal(loc=g_inp_kwargs['num'] * p, scale=np.sqrt(g_inp_kwargs['num'] * p * (1 - p)), size=net.neuron[g].size) * g_inp_kwargs['amplitude']
-#         if input_type == 'step':
-#             inp[g] = g_inp_kwargs['amplitude'] if (i*dt >= g_inp_kwargs['start'] and i*dt < g_inp_kwargs['end']) else 0
-#         if input_type == 'sin':
-#             inp[g] = g_inp_kwargs['amplitude'] * np.sin(2 * np.pi * g_inp_kwargs['k'] * i * dt + g_inp_kwargs['phase'])
-#     return inp
+class SNNSimulator(cf.MetaModel):
+    def __init__(self):
+        super().__init__()
+        bm.clear_buffer_memory()
+        self.params = {}
+        self.simulation_results = defaultdict(list)
+        self.set_optional_params_default()
+        self.extend_ignore_key_list('chunck_interval')
+
+    def set_up(self, basedir, code_file_list, value_dir_key=None, both_dir_key=None, ignore_key_list=None, force_run=False):
+        super().set_up(params=self.params, basedir=basedir, code_file_list=code_file_list, value_dir_key=value_dir_key, both_dir_key=both_dir_key, ignore_key_list=ignore_key_list, force_run=force_run)
+        self.get_net()
+        self.get_monitors()
+        self.get_runner()
+
+    def set_optional_params_default(self):
+        '''
+        设置一些不强制需要的参数的默认值
+        '''
+        self.set_chunck_interval(None)
+
+    def set_random_seed(self, bm_seed=421):
+        '''
+        设置随机种子
+        '''
+        bm.random.seed(bm_seed)
+        self.params['bm_seed'] = bm_seed
+
+    def set_dt(self, dt):
+        '''
+        设置dt
+        '''
+        self.dt = dt
+        self.params['dt'] = dt
+        bm.set_dt(dt)
+
+    def set_total_simulation_time(self, total_simulation_time):
+        '''
+        设置总的仿真时间
+        '''
+        self.total_simulation_time = total_simulation_time
+        self.params['total_simulation_time'] = total_simulation_time
+
+    def set_chunck_interval(self, chunck_interval):
+        '''
+        设置分段运行的时间间隔
+        '''
+        self.chunck_interval = chunck_interval
+        self.params['chunck_interval'] = chunck_interval
+
+    @abc.abstractmethod
+    def get_net(self):
+        '''
+        获取网络模型(子类需要实现,并且定义为self.net)
+        '''
+        self.net = None
+
+    @abc.abstractmethod
+    def get_monitors(self):
+        '''
+        获取监测器(子类需要实现,并且定义为self.monitor)
+        '''
+        self.monitors = None
+
+    @abc.abstractmethod
+    def get_runner(self):
+        '''
+        获取runner(子类需要实现,并且定义为self.runner)
+        '''
+        self.runner = None
+
+    def update_simulation_results_from_runner(self):
+        '''
+        更新直接结果
+        '''
+        for k, v in self.runner.mon.items():
+            self.simulation_results[k].append(v)
+
+    def organize_simulation_results(self):
+        '''
+        整理直接结果
+        '''
+        for k in self.simulation_results.keys():
+            self.simulation_results[k] = np.concatenate(self.simulation_results[k], axis=0)
+
+    def clear_runner_mon(self):
+        '''
+        清空runner的监测器
+        '''
+        self.runner.mon = None
+        self.runner._monitors = None
+
+    def finalize_run(self):
+        '''
+        运行结束后,整理结果
+        '''
+        self.organize_simulation_results()
+        self.clear_runner_mon()
+        super().finalize_run()
+
+    def basic_run_time_interval(self, time_interval):
+        '''
+        运行模型,并且保存结果
+        '''
+        self.runner.run(time_interval)
+        self.update_simulation_results_from_runner()
+
+    def run_time_interval_in_chunks(self, time_interval):
+        '''
+        分段运行模型,以防止内存溢出
+        '''
+        chunck_num = int(time_interval / self.chunck_interval)
+        remaining_time = time_interval
+        for _ in range(chunck_num):
+            if self.chunck_interval <= remaining_time:
+                self.run_time_interval(self.chunck_interval)
+                remaining_time -= self.chunck_interval
+            else:
+                self.run_time_interval(remaining_time)
+                remaining_time = 0
+
+    def run_time_interval(self, time_interval):
+        '''
+        运行模型,并且保存结果(自动选择分段运行还是直接运行)
+        '''
+        if self.chunck_interval is not None:
+            self.run_time_interval_in_chunks(time_interval)
+        else:
+            self.basic_run_time_interval(time_interval)
+
+    def run_detail(self):
+        '''
+        运行模型,并且保存结果
+
+        注意: 
+        当子类有多个阶段,需要重写此方法
+        当内存紧张的时候,可以调用run_time_interval,分段运行
+        '''
+        self.run_time_interval(self.total_simulation_time)
 
 
-# def get_inp(net, inp_kwargs, dt, step_list):
-#     inp = []
-#     for i in step_list:
-#         inp.append(get_input_i(net, inp_kwargs, dt, i))
-#     return inp
+def custom_bp_running_cpu_parallel(func, params_list, num_process=10, mode='ordered'):
+    '''
+    参数:
+    func: 需要并行计算的函数
+    params_list: 需要传入的参数列表,例如[(a0, b0), (a1, b1), ...]
+    num_process: 进程数
+    mode: 运行模式,ordered表示有序运行,unordered表示无序运行
 
+    注意:
+    jupyter中使用时,func需要重新import,所以不建议在jupyter中使用
+    '''
+    bm.set_platform('cpu')
+    total_num = len(params_list)
+    
+    # 将参数列表转换为分块结构(实测这样相比直接运行可以防止mem累积)
+    for chunk_idx in range((total_num + num_process - 1) // num_process):
+        # 计算当前分片的起止索引
+        start_idx = chunk_idx * num_process
+        end_idx = min((chunk_idx + 1) * num_process, total_num)
+        local_num_process = end_idx - start_idx
         
-class InpGenerator:
-    def __init__(self, net):
-        self.net = net
+        # 提取当前分片的参数并转换结构
+        chunk_params = params_list[start_idx:end_idx]
+        transposed_params = [list(param_chunk) for param_chunk in zip(*chunk_params)]
+        
+        # 打印调试信息
+        cf.print_title(f"Processing chunk {chunk_idx}: [{start_idx}-{end_idx})")
+        
+        # 执行并行计算
+        if mode == 'ordered':
+            bp.running.cpu_ordered_parallel(func, transposed_params, num_process=local_num_process)
+        else:
+            bp.running.cpu_unordered_parallel(func, transposed_params, num_process=local_num_process)
 
-    def __call__(self, i):
-        return np.array(self.net.jit_step_run(i))
 
-
-def get_inp_generator(size, inp_kwargs, dt):
-    '''
-    size: dict
-    '''
-    inp = {}
-    for g, g_inp_kwargs in inp_kwargs.items():
-        input_type = g_inp_kwargs['type']
-        if input_type == 'dualexpon_poisson':
-            pre_neuron = bp.dyn.PoissonGroup
-            pre_neuron_params = {'size': g_inp_kwargs['num'], 'freqs': g_inp_kwargs['rate']}
-            post_neuron = bp.dyn.Lif
-            post_neuron_params = {'size': size[g], 'V_rest': 0.0, 'V_reset': 0.0, 'V_th': 1.0, 'R': 1.0, 'tau': 1.0}
-            comm = bp.dnn.EventCSRLinear(bp.conn.FixedProb(g_inp_kwargs['prob'], pre=g_inp_kwargs['num'], post=size[g]), weight=g_inp_kwargs['weight'])
-            synapse = NormalizedDualExponCUBA
-            synapse_params = {'tau_rise': g_inp_kwargs['tau_rise'], 'tau_decay': g_inp_kwargs['tau_decay'], 'delay': 0.0}
-            net = NetForConstructInp(pre_neuron, post_neuron, pre_neuron_params, post_neuron_params, synapse, synapse_params, comm)
-
-            inp[g] = InpGenerator(net)
-        if input_type == 'expon_poisson':
-            pre_neuron = bp.dyn.PoissonGroup
-            pre_neuron_params = {'size': g_inp_kwargs['num'], 'freqs': g_inp_kwargs['rate']}
-            post_neuron = bp.dyn.Lif
-            post_neuron_params = {'size': size[g], 'V_rest': 0.0, 'V_reset': 0.0, 'V_th': 1.0, 'R': 1.0, 'tau': 1.0}
-            comm = bp.dnn.EventCSRLinear(bp.conn.FixedProb(g_inp_kwargs['prob'], pre=g_inp_kwargs['num'], post=size[g]), weight=g_inp_kwargs['weight'])
-            synapse = NormalizedExponCUBA
-            synapse_params = {'tau': g_inp_kwargs['tau'], 'delay': 0.0}
-            net = NetForConstructInp(pre_neuron, post_neuron, pre_neuron_params, post_neuron_params, synapse, synapse_params, comm)
-
-            inp[g] = InpGenerator(net)
-        if input_type == 'constant':
-            class ConstantInp:
-                def __init__(self, mean):
-                    self.mean = mean
-
-                def __call__(self, i):
-                    return self.mean
-            
-            inp[g] = ConstantInp(g_inp_kwargs['mean'])
-        if input_type == 'wiener':
-            class WienerInp:
-                def __init__(self, mean, std):
-                    self.mean = mean
-                    self.std = std
-
-                def __call__(self, i):
-                    return np.random.randn(*(size[g]))*self.std + self.mean
-            
-            inp[g] = WienerInp(g_inp_kwargs['mean'], g_inp_kwargs['std'])
-    return inp
 # endregion
 
 
 # region 神经元网络模型
-class NetForConstructInp(bp.DynSysGroup):
-    def __init__(self, pre_neuron, post_neuron, pre_neuron_params, post_neuron_params, synapse, synapse_params, comm):
-        super().__init__()
-
-        self.pre_neuron_params = pre_neuron_params.copy()
-        self.post_neuron_params = post_neuron_params.copy()
-        self.synapse_params = synapse_params.copy()
-
-        # neurons
-        self.pre = pre_neuron(**self.pre_neuron_params)
-        self.post = post_neuron(**self.post_neuron_params)
-
-        # synapses
-        self.synapse = synapse(pre=self.pre, post=self.post, comm=comm, **self.synapse_params)
-        
-    def update(self):
-        self.pre()
-        self.synapse()
-        self.post()
-
-        # monitor
-        return self.post.sum_current_inputs(self.post.V)
-
-@cf.deprecated
-class EINet(bp.DynSysGroup):
-    def __init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm):
-        super().__init__()
-
-        self.E_params = E_params.copy()
-        self.I_params = I_params.copy()
-        self.E2E_synapse_params = E2E_synapse_params.copy()
-        self.E2I_synapse_params = E2I_synapse_params.copy()
-        self.I2E_synapse_params = I2E_synapse_params.copy()
-        self.I2I_synapse_params = I2I_synapse_params.copy()
-
-        # neurons
-        self.E = E_neuron(**self.E_params)
-        self.I = I_neuron(**self.I_params)
-
-        # synapses
-        self.E2E = E2E_synapse(pre=self.E, post=self.E, comm=E2E_comm, **self.E2E_synapse_params)
-        self.E2I = E2I_synapse(pre=self.E, post=self.I, comm=E2I_comm, **self.E2I_synapse_params)
-        self.I2E = I2E_synapse(pre=self.I, post=self.E, comm=I2E_comm, **self.I2E_synapse_params)
-        self.I2I = I2I_synapse(pre=self.I, post=self.I, comm=I2I_comm, **self.I2I_synapse_params)
-        
-    def update(self, E_inp, I_inp):
-        self.E2E()
-        self.E2I()
-        self.I2E()
-        self.I2I()
-        self.E(E_inp)
-        self.I(I_inp)
-
-        # monitor
-        return self.E.spike, self.I.spike, self.E.V, self.I.V
-
-
-class MultiGroupNet(bp.DynSysGroup):
-    """
-    多个gruop的神经元网络模型。比如EI网络。
-
-    属性:
-        neuron (dict): 包含每个组神经元对象的字典。
-        synapse (dict): 包含连接神经元组的突触对象的字典。
-    """
-    def __init__(self, neuron, synapse, inp_neuron, inp_synapse, neuron_params, synapse_params, inp_neuron_params, inp_synapse_params, comm, inp_comm, update_output=None, seperate_EI_inp=True, seperate_ext_inp=False):
-        """
-        初始化 MultiGroupNet 实例。
-
-        参数:
-            neuron (dict): 包含每个组的神经元类型的字典。
-            synapse (dict): 包含每个连接的突触类型的字典。(必须是{pre}2{post}的形式)
-            inp_neuron (dict): 包含输入神经元类型的字典。
-            inp_synapse (dict): 包含输入突触类型的字典。
-            neuron_params (dict): 包含神经元初始化参数的字典。
-            synapse_params (dict): 包含突触初始化参数的字典。
-            inp_neuron_params (dict): 包含输入神经元初始化参数的字典。
-            inp_synapse_params (dict): 包含输入突触初始化参数的字典。
-            comm (dict): 包含组之间通信参数的字典。
-            inp_comm (dict): 包含输入组和其他组通信参数的字典。
-            update_output (list): 包含每个组输出的列表。默认为None。
-            seperate_EI_inp (bool): 是否分开输入。默认为True。(假如True,则需要写好label为E和I,并使用EI的neuron模型比如EILifRef;假如为False则可以使用原版并无需写label)
-            seperate_ext_inp (bool): 是否分开外部输入。默认为False。(假如False,则需要写好label为E,因为外界输入的label都是E;假如为True,代码尚未实现)
-        """
-        super().__init__()
-
-        self.group = neuron.keys()
-        self.inp_group = inp_neuron.keys()
-
-        self.neuron = bm.NodeDict()
-        for g in self.group:
-            self.neuron[g] = neuron[g](**neuron_params[g])
-
-        self.inp_neuron = bm.NodeDict()
-        for g in inp_neuron.keys():
-            self.inp_neuron[g] = inp_neuron[g](**inp_neuron_params[g])
-
-        self.synapse = bm.NodeDict()
-        for syn_type in synapse.keys():
-            s, t = syn_type.split('2')
-            self.synapse[f'{s}2{t}'] = synapse[f'{s}2{t}'](pre=self.neuron[s], post=self.neuron[t], comm=comm[f'{s}2{t}'], **synapse_params[f'{s}2{t}'])
-        
-        self.inp_synapse = bm.NodeDict()
-        for syn_type in inp_synapse.keys():
-            s, t = syn_type.split('2')
-            self.inp_synapse[f'{s}2{t}'] = inp_synapse[f'{s}2{t}'](pre=self.inp_neuron[s], post=self.neuron[t], comm=inp_comm[f'{s}2{t}'], **inp_synapse_params[f'{s}2{t}'])
-
-        # 设定update_output
-        if update_output is None:
-            self.update_output = ['spike', 'V']
-        else:
-            self.update_output = update_output.copy()
-        
-        self.seperate_EI_inp = seperate_EI_inp
-        self.seperate_ext_inp = seperate_ext_inp
-
-    def update(self, inp):
-        """
-        根据输入更新网络状态。
-
-        此方法根据提供的输入更新网络中神经元和突触的状态。
-
-        参数:
-            inp (dict): 包含每个神经元组的输入的字典。
-
-        返回:
-            dict: 包含每个神经元组的输出的字典。
-
-        注意:
-            current为某个neuron_group的输入电流,而不是输出
-        """
-        for s in self.synapse.keys():
-            self.synapse[s]()
-        for s in self.inp_synapse.keys():
-            self.inp_synapse[s]()
-        for g in self.neuron.keys():
-            if g in inp.keys():
-                self.neuron[g](inp[g])
-            else:
-                self.neuron[g]()
-        for g in self.inp_neuron.keys():
-            self.inp_neuron[g]()
-
-        
-        result = {}
-        if 'spike' in self.update_output:
-            result['spike'] = {g: self.neuron[g].spike.value for g in self.neuron.keys()}
-        if 'V' in self.update_output:
-            result['V'] = {g: self.neuron[g].V.value for g in self.neuron.keys()}
-        # if 'internal_current' in self.update_output:
-        #     if self.seperate_EI_inp:
-        #         result['internal_current'] = {}
-        #         for s in ['E', 'I']:
-        #             for t in self.group:
-        #                 result['internal_current'][f'{s}2{t}'] = self.neuron[t].sum_current_inputs(self.neuron[t].V, label=s)
-        #     else:
-        #         result['internal_current'] = {t: self.neuron[t].sum_current_inputs(self.neuron[t].V) for t in self.neuron.keys()}
-        # if 'external_current' in self.update_output:
-        #     result['external_current'] = inp
-        if 'current' in self.update_output:
-            if self.seperate_ext_inp:
-                raise NotImplementedError
-            else:
-                if self.seperate_EI_inp:
-                    result['current'] = {}
-                    for s in ['E', 'I']:
-                        for t in self.group:
-                            if t in inp.keys():
-                                result['current'][f'{s}2{t}'] = self.neuron[t].sum_current_inputs(self.neuron[t].V, label=s) + inp[t]
-                            else:
-                                result['current'][f'{s}2{t}'] = self.neuron[t].sum_current_inputs(self.neuron[t].V, label=s)
-                else:
-                    result['current'] = {t: self.neuron[t].sum_current_inputs(self.neuron[t].V) for t in self.neuron.keys()}
-        return result
-
-
 class MultiNet(bp.DynSysGroup):
-    def __init__(self, neuron, synapse, inp_neuron, inp_synapse, neuron_params, synapse_params, inp_neuron_params, inp_synapse_params, comm, inp_comm):
+    def __init__(self, neuron, synapse, inp_neuron, inp_synapse, neuron_params, synapse_params, inp_neuron_params, inp_synapse_params, comm, inp_comm, print_info=True):
         """
         参数:
             neuron (dict): 包含每个组的神经元类型的字典。
@@ -1569,122 +1442,13 @@ class MultiNet(bp.DynSysGroup):
         
         for syn_type in synapse.keys():
             s, t, name = syn_type
-            # cf.print_title(f'{s}2{t} {name} synapse')
+            if print_info:
+                cf.print_title(f'{s}2{t} {name} synapse')
             setattr(self, cf.concat_str([f'{s}2{t}', name]), synapse[syn_type](pre=getattr(self, s), post=getattr(self, t), comm=comm[syn_type], **synapse_params[syn_type]))
 
         for inp_syn_type in inp_synapse.keys():
             s, t, name = inp_syn_type
-            # cf.print_title(f'{s}2{t} {name} synapse')
+            if print_info:
+                cf.print_title(f'{s}2{t} {name} synapse')
             setattr(self, cf.concat_str([f'{s}2{t}', name]), inp_synapse[inp_syn_type](pre=getattr(self, s), post=getattr(self, t), comm=inp_comm[inp_syn_type], **inp_synapse_params[inp_syn_type]))
-
-
-@cf.deprecated
-class MultiAreaEINet(EINet):
-    def __init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm, E_idx_to_area, I_idx_to_area):
-        super().__init__(E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm)
-    
-    def area_fr(self):
-        # 计算各个区域的firing rate
-        pass
-
-
-@cf.deprecated
-class SpatialEINet(EINet):
-    def __init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm, E_pos, I_pos):
-        super().__init__(E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm)
-
-        self.E_pos = E_pos
-        self.I_pos = I_pos
-
-
-# class MultiAreaSpatialEINet(MultiAreaEINet, SpatialEINet):
-#     def __init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm, E_pos, I_pos, E_idx_to_area, I_idx_to_area):
-#         MultiAreaEINet.__init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm, E_idx_to_area, I_idx_to_area)
-#         SpatialEINet.__init__(self, E_neuron, I_neuron, E_params, I_params, E2E_synapse, E2I_synapse, I2E_synapse, I2I_synapse, E2E_synapse_params, E2I_synapse_params, I2E_synapse_params, I2I_synapse_params, E2E_comm, E2I_comm, I2E_comm, I2I_comm, E_pos, I_pos)
-# endregion
-
-
-# region test
-def test():
-    bp.math.set_platform('cpu')
-    # EI_ratio = 4
-    EI_ratio = 8
-    E2E_weight = 1
-    E2I_weight = 1
-    I2E_weight = -4
-    I2I_weight = -4
-    # E_size = 4*81
-    E_size = 8*27
-    I_size = E_size // EI_ratio
-
-    E_params = {'size': E_size, 'V_th': 20.0, 'V_reset': -5.0, 'V_rest':0., 'tau_ref': 5.0, 'R': 1.0, 'tau': 10.0}
-    I_params = {'size': I_size, 'V_th': 20.0, 'V_reset': -5.0, 'V_rest':0., 'tau_ref': 5.0, 'R': 1.0, 'tau': 10.0}
-    E2E_synapse_params = {'delay': 0}
-    E2I_synapse_params = {'delay': 0}
-    I2E_synapse_params = {'delay': 0}
-    I2I_synapse_params = {'delay': 0}
-
-    E_inp_mean = 10
-    E_inp_std = 30
-    I_inp_mean = 10
-    I_inp_std = 30
-
-    # E_pos = np.meshgrid(np.linspace(0, 1, int(np.sqrt(E_size))) + np.random.rand(int(np.sqrt(E_size))) / E_size, np.linspace(0, 1, int(np.sqrt(E_size))) + np.random.rand(int(np.sqrt(E_size))) / E_size)
-    # E_pos = np.stack([E_pos[0].flatten(), E_pos[1].flatten()], axis=1)
-    # I_pos = np.meshgrid(np.linspace(0, 1, int(np.sqrt(I_size))), np.linspace(0, 1, int(np.sqrt(I_size))))
-    # I_pos = np.stack([I_pos[0].flatten(), I_pos[1].flatten()], axis=1)
-    E_pos = np.meshgrid(np.linspace(0, 1, round(E_size**(1/3))) + np.random.rand(round(E_size**(1/3))) / E_size, np.linspace(0, 1, round(E_size**(1/3))) + np.random.rand(round(E_size**(1/3))) / E_size, np.linspace(0, 1, round(E_size**(1/3))) + np.random.rand(round(E_size**(1/3))) / E_size)
-    E_pos = np.stack([E_pos[0].flatten(), E_pos[1].flatten(), E_pos[2].flatten()], axis=1)
-    print(E_pos.shape)
-    I_pos = np.meshgrid(np.linspace(0, 1, round(I_size**(1/3))), np.linspace(0, 1, round(I_size**(1/3))), np.linspace(0, 1, round(I_size**(1/3))) + np.random.rand(round(I_size**(1/3))) / I_size)
-    I_pos = np.stack([I_pos[0].flatten(), I_pos[1].flatten(), I_pos[2].flatten()], axis=1)
-
-    dt = 1.
-    bm.set_dt(dt)
-
-    conn_num = 100
-    LAM = 0.3
-
-    # E2E_connection = np.random.rand(E_size, E_size)
-    # E2E_connection = E2E_connection > 0.95
-    # E2E_connection = csr_matrix(E2E_connection)
-    E2E_connection = edr_connection(E_pos, E_pos, LAM)
-    E2E_conn = csr_to_conn(E2E_connection)
-    E2E_comm = bp.dnn.EventCSRLinear(conn=E2E_conn, weight=E2E_weight)
-
-    # E2I_connection = np.zeros((E_size, I_size))
-    # E2I_connection[1, 0] = 1
-    # E2I_connection = csr_matrix(E2I_connection)
-    E2I_connection = edr_connection(E_pos, I_pos, LAM)
-    E2I_conn = csr_to_conn(E2I_connection)
-    E2I_comm = bp.dnn.EventCSRLinear(conn=E2I_conn, weight=E2I_weight)
-
-    # I2E_connection = np.zeros((I_size, E_size))
-    # I2E_connection[1, 0] = 1
-    # I2E_connection = csr_matrix(I2E_connection)
-    I2E_connection = edr_connection(I_pos, E_pos, LAM)
-    I2E_conn = csr_to_conn(I2E_connection)
-    I2E_comm = bp.dnn.EventCSRLinear(conn=I2E_conn, weight=I2E_weight)
-
-    # I2I_connection = np.zeros((I_size, I_size))
-    # I2I_connection[1, 0] = 1
-    # I2I_connection = csr_matrix(I2I_connection)
-    I2I_connection = edr_connection(I_pos, I_pos, LAM)
-    I2I_conn = csr_to_conn(I2I_connection)
-    I2I_comm = bp.dnn.EventCSRLinear(conn=I2I_conn, weight=I2I_weight)
-
-    EI_net = SpatialEINet(E_neuron=bp.dyn.LifRef, I_neuron=bp.dyn.LifRef, E_params=E_params, I_params=I_params, E2E_synapse=bp.dyn.FullProjDelta, E2I_synapse=bp.dyn.FullProjDelta, I2E_synapse=bp.dyn.FullProjDelta, I2I_synapse=bp.dyn.FullProjDelta, E2E_synapse_params=E2E_synapse_params, E2I_synapse_params=E2I_synapse_params, I2E_synapse_params=I2E_synapse_params, I2I_synapse_params=I2I_synapse_params, E2E_comm=E2E_comm, E2I_comm=E2I_comm, I2E_comm=I2E_comm, I2I_comm=I2I_comm, E_pos=E_pos, I_pos=I_pos)
-
-    # E_inp_mean = np.ones(E_size)*0
-    # E_inp_mean[1] = 30
-    run_func = get_run_func(EI_net, {'mean': E_inp_mean, 'std': E_inp_std}, {'mean': I_inp_mean, 'std': I_inp_std}, E_size, I_size, input_type='wiener')
-
-
-    indices = np.arange(100)
-    ts = indices * bm.get_dt()
-    E_spike, I_spike, E_V, I_V = bm.for_loop(run_func, indices, progress_bar=True)
-
-    casual_spike_video([5], None, E_spike, E_pos, I_spike, I_pos, E2E_connection, E2I_connection, I2E_connection, I2I_connection, 0, dt, './video', 'casual_spike_video', scatter_size=(cf.MARKER_SIZE/3)**2, faint_num=3, legend_loc='upper left', bbox_to_anchor=(1, 1), elev_list=[cf.ELEV], azim_list=[cf.AZIM], margin={'left': 0.1, 'right':0.75, 'bottom' : 0.1, 'top': 0.75}, fig_ax_kwargs={}, scatter_kwargs={}, set_ax_kwargs={}, save_fig_kwargs={}, video_kwargs={'frame_rate': 5})
-
-    spike_video(E_spike, E_pos, I_spike, I_pos, dt, './video', 'spike_video', scatter_size=(cf.MARKER_SIZE/3)**2, faint_num=3, legend_loc='upper left', bbox_to_anchor=(1, 1), elev_list=[cf.ELEV], azim_list=[cf.AZIM], margin={'left': 0.1, 'right':0.75, 'bottom' : 0.1, 'top': 0.75}, fig_ax_kwargs={}, scatter_kwargs={}, set_ax_kwargs={}, save_fig_kwargs={}, video_kwargs={'frame_rate': 5})
 # endregion

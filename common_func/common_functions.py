@@ -30,6 +30,12 @@ from cProfile import Profile
 from pstats import Stats
 import tracemalloc
 import itertools
+import contextlib
+import abc
+import glob
+import pdb
+import types
+from collections import defaultdict
 
 
 # 数学和科学计算库
@@ -532,6 +538,16 @@ def get_time_seed():
     return (timestamp * 1000000 + microsecond) % (2**31-1)
 
 
+def get_time_seed_or_retain(seed=None):
+    '''
+    如果seed为None,则返回时间种子,否则返回seed
+    '''
+    if seed is None:
+        return get_time_seed()
+    else:
+        return seed
+
+
 def get_local_rng_by_time():
     '''
     返回局部随机数生成器(rng:Random Number Generator)
@@ -974,13 +990,14 @@ class Logger:
         # python logging库的logger(先设置为None)
         self.py_logger = None
 
-    def get_py_logger(self, basedir, filename=None, name='', level=logging.DEBUG, format=None, datefmt='%Y-%m-%d %H:%M:%S', filemode='w', print_to_console=False):
+    def get_py_logger(self, basedir, filename=None, name='', level=logging.DEBUG, format=None, datefmt='%Y-%m-%d %H:%M:%S', filemode='w', print_to_console=False, create_dir=True):
         '''
         注意: 特别不建议打开print_to_console,因为使用普通的抓取时,由于记录到logger中,这里会重复打印一遍
         '''
-        # 创建文件夹
         self.basedir = basedir
-        mkdir(self.basedir)
+        if create_dir:
+            # 创建文件夹
+            mkdir(self.basedir)
 
         # 获取filename
         if filename is None:
@@ -1005,7 +1022,7 @@ class Logger:
 
         # 配置文件处理器
         if filename:
-            file_handler = logging.FileHandler(filename, mode=filemode)
+            file_handler = logging.FileHandler(filename, mode=filemode, delay=True)
             file_handler.setFormatter(formatter)
             self.py_logger.addHandler(file_handler)
 
@@ -1206,15 +1223,6 @@ def method_decorator(decorator):
 
 
 # region 测试相关函数
-def common_mistake():
-    '''常见错误'''
-    # 变量直接赋值导致的同时修改
-    # == 与 = 的混淆
-    # zip(a, b)的多次使用,导致zip对象被消耗,第二次使用时为空,可以使用转换为list或者tuple来解决(见函数get_reusable_zip)
-    # to be continued
-    pass
-
-
 def flex_func_printer(func, print_func=print, lite=True, multi_result=False):
     '''
     打印出函数的所有输入,输出以及变量名
@@ -1487,15 +1495,15 @@ def func_profiler(func):
 
 
 # region 文件操作相关函数
-@message_decorator("it will print the common_functions.py, if you want to use it in another file, you can directly copy the code in the file, or in a better way, just use the current_file function")
+@message_decorator("it will always print the common_functions.py. If you want to use it in another file, you can directly copy the code in the file, or in a better way, just use the current_file function")
 def current_file_py():
-    '''获取当前文件名'''
+    '''获取当前文件名(不带路径,带后缀)'''
     return os.path.basename(__file__)
 
 
 def caller_filename():
     '''
-    打印调用此函数的文件名
+    打印调用此函数的文件名(带整个路径)
 
     如果是在Jupyter Notebook中运行,返回的是一个临时文件名,请使用current_file_ipynb函数获取当前文件名
     如果是在.py文件中运行,返回的是调用者的文件名(这也是为什么current_file需要显式复制这段代码,而不是调用这个函数,因为在common_functions.py中调用这个函数会返回common_functions.py)
@@ -1511,7 +1519,7 @@ def caller_filename():
 
 
 def current_file_ipynb():
-    '''获取当前文件名'''
+    '''获取当前文件名(带整个路径)'''
     from IPython import get_ipython
     ip = get_ipython()
     path = None
@@ -1521,7 +1529,7 @@ def current_file_ipynb():
 
 
 def current_file():
-    '''获取当前文件名'''
+    '''获取当前文件名(带整个路径)'''
     try:
         return current_file_ipynb()
     except:
@@ -1533,6 +1541,11 @@ def current_file():
         caller_filename = caller_frame.filename
         # 打印文件名
         return caller_filename
+
+
+def current_filename():
+    '''获取当前文件名(不带后缀,不带路径)'''
+    return os.path.splitext(os.path.basename(current_file()))[0]
 
 
 def current_dir():
@@ -1876,6 +1889,37 @@ def check_all_file_exist(*paths):
     return all(os.path.exists(path) for path in paths)
 
 
+def check_all_file_exist_with_any_extension(*paths):
+    """
+    检查文件路径或该路径加任意后缀的文件是否存在
+    参数: *paths (str): 可变数量的文件路径
+    返回: bool: 当且仅当每个路径满足以下条件之一时返回True:
+        1. 路径本身存在（文件或目录）
+        2. 所在目录存在同名且带任意后缀的文件
+    """
+    for path in paths:
+        # 先检查路径本身是否存在
+        if os.path.exists(path):
+            continue
+            
+        # 分离目录和文件名
+        dir_path = os.path.dirname(path) or '.'  # 处理无目录的情况
+        file_name = os.path.basename(path)
+        
+        # 构建匹配模式（文件名.*）
+        pattern = os.path.join(dir_path, f"{file_name}.*")
+        
+        # 查找符合条件的普通文件（排除目录）
+        found = any(
+            os.path.isfile(p) and not p.endswith('.')  # 排除以点结尾的无效文件
+            for p in glob.glob(pattern)
+        )
+        
+        if not found:
+            return False
+    return True
+
+
 def get_subfile(basedir, full=True):
     '''找到文件夹下的所有文件(非文件夹),full为True则返回全路径,否则只返回文件名'''
     if full:
@@ -1898,7 +1942,7 @@ def get_common_subdir(basedir, subdir_names=None):
 
     Args:
         basedir (str): 目录的路径
-        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']
+        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs', 'params']
 
     Returns:
         list: 子目录的完整路径列表。
@@ -1914,7 +1958,7 @@ def get_common_subdir_dict(basedir, subdir_names=None):
     
     Args:
         basedir (str): 目录的路径
-        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs']
+        subdir_names (list, optional): 子目录名称列表。默认为 ['outcomes', 'models', 'figs', 'logs', 'params']
 
     Returns:
         dict: 子目录的完整路径字典。
@@ -2089,7 +2133,7 @@ def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dic
     save_dir (str): 保存文件的目标目录
     save_func_dict (dict): 指定每个键的保存函数,None则自动选择
     save_kwargs_dict (dict): 指定每个键的保存函数的参数,None则不输入参数
-    overwrite (bool): 是否覆盖已存在的目标目录,默认为 False
+    overwrite (bool): 是否覆盖整个已存在的目标目录,默认为 False
     save_txt (bool): 是否保存为txt文件,默认为 True(txt保存的是整个字典,方便预览)
     process_num (int): 并行处理的进程数,默认为 1
     key_to_save (list): 指定要保存的键的列表,默认为 None,保存所有键
@@ -2123,9 +2167,60 @@ def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dic
     # 保存键映射
     save_dict(metadata, os.path.join(save_dir, 'metadata'))
 
-    # 保存原始字典
+    # 保存原始字典的预览
     if save_txt:
-        save_dict(dict_data, os.path.join(save_dir, 'preview'), format_list=['txt'], key_to_save=key_to_save)
+        for k, v in dict_data.items():
+            if k in key_to_save:
+                save_dict({k: v}, os.path.join(save_dir, 'preview', metadata[k]), format_list=['txt'])
+
+
+def save_dict_separate_merge_to_saved(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, save_txt=True, process_num=1, key_to_save=None):
+    '''
+    save_dict_separate,但是将保存的文件合并到已经存在的separate saved dict中,更新metadata
+
+    注意:
+    不允许overwrite
+    不允许原先dict和新dict中有相同的键
+    '''
+    # 读取已存在的metadata
+    exist_metadata = load_pkl(os.path.join(save_dir, 'metadata'))
+
+    # 检查是否存在相同的键
+    for k in dict_data.keys():
+        if k in exist_metadata.values():
+            raise ValueError(f"Key '{k}' already exists in the existing metadata. Please use a different key.")
+
+    # 保存
+    save_dict_separate(dict_data, save_dir, save_func_dict=save_func_dict, save_kwargs_dict=save_kwargs_dict, overwrite=False, save_txt=save_txt, process_num=process_num, key_to_save=key_to_save)
+
+    # 更新metadata
+    new_metadata = load_pkl(os.path.join(save_dir, 'metadata')) # 读取新保存的metadata
+    metadata = update_dict(exist_metadata, new_metadata) # 合并metadata
+    
+    # 保存更新后的metadata和preview
+    save_dict(metadata, os.path.join(save_dir, 'metadata'))
+
+
+def check_saved_dict_completeness(save_dir):
+    '''
+    检查保存的字典是否完整,即metadata文件和所有子文件都存在
+    '''
+    completeness = True
+
+    # 检查metadata文件是否存在
+    if not check_all_file_exist_with_any_extension(os.path.join(save_dir, 'metadata')):
+        completeness = False
+        print(f"Metadata file not found in {save_dir}")
+        return completeness
+
+    # 检查子文件是否存在
+    metadata = load_pkl(os.path.join(save_dir, 'metadata'))
+    for k, v in metadata.items():
+        if not check_all_file_exist_with_any_extension(os.path.join(save_dir, v)):
+            completeness = False
+            print(f"File {k} not found in {save_dir}")
+            return completeness
+    return completeness
 
 
 def part_load_dict_separate(load_dir, subfile, metadata, key_to_load):
@@ -2211,6 +2306,13 @@ def load_dict_auto(filename, key_to_load=None, filter_str=None, filter_mode='inc
         return load_pkl(os.path.join(filename))
 
 
+def load_dict(*args, **kwargs):
+    '''
+    load_dict_auto的缩写
+    '''
+    return load_dict_auto(*args, **kwargs)
+
+
 def pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir):
     '''
     弹出一部分参数,并且返回路径名
@@ -2229,31 +2331,37 @@ def pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir):
     return local_dict_data, basedir
 
 
-def save_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, format_list=None):
+def save_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, format_list=None, pop=True):
     '''
     把一部分参数保存到路径名里,另一部分参数保存到文件里
 
     注意:
-    保存在路径名里的参数会被弹出,不会保存到文件里
+    pop为True,则保存在路径名里的参数会被弹出,不会保存到文件里;pop为False,则保存原先的字典
     '''
     local_dict_data, dictdir = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)
-    save_dict(local_dict_data, os.path.join(dictdir, dict_name), format_list)
+    if pop:
+        save_dict(local_dict_data, os.path.join(dictdir, dict_name), format_list)
+    else:
+        save_dict(dict_data, os.path.join(dictdir, dict_name), format_list)
     return dictdir
 
 
-def save_timed_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, after_timedir='', current_time=None, format_list=None):
+def save_timed_dir_dict(dict_data, basedir, dict_name, value_dir_key=None, both_dir_key=None, after_timedir='', current_time=None, format_list=None, pop=True):
     '''
     把一部分参数保存到路径名里,另一部分参数保存到文件里,并且在路径名里加入时间
 
     注意:
-    保存在路径名里的参数会被弹出,不会保存到文件里
+    pop为True,则保存在路径名里的参数会被弹出,不会保存到文件里;pop为False,则保存原先的字典
     '''
     if current_time is None:
         current_time = get_time()
     local_dict_data, basedir = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)
     timedir = os.path.join(basedir, current_time)
     dictdir = os.path.join(timedir, after_timedir)
-    save_dict(local_dict_data, os.path.join(dictdir, dict_name), format_list)
+    if pop:
+        save_dict(local_dict_data, os.path.join(dictdir, dict_name), format_list)
+    else:
+        save_dict(dict_data, os.path.join(dictdir, dict_name), format_list)
     return timedir, dictdir
 
 
@@ -2434,7 +2542,7 @@ def load_multi_pkl(basedir, params_name_list, pkl_name, ext='joblib', sep='_'):
     return all_pkl
 
 
-def dict_exist(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, both_dir_key=None, ignore_key=None):
+def dict_exist(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, both_dir_key=None, ignore_key=None, pop=True):
     '''
     比较参数,如果参数不同,则返回False
 
@@ -2445,6 +2553,10 @@ def dict_exist(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, b
     没有按照时间保存,而是按照pop_dict_get_dir保存的,那么这个函数可以用来判断是否已经保存过这个dict,如果保存过,则返回True,否则返回False
     '''
     local_dict_data = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)[0]
+    if pop:
+        pass
+    else:
+        local_dict_data = dict_data.copy()
     pkl_dir = os.path.join(basedir, f'{pkl_name}.{ext}')
     if not os.path.exists(pkl_dir):
         return False
@@ -2453,7 +2565,7 @@ def dict_exist(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, b
         return compare_dict(local_dict_data, exist_dict_data, ignore_key)
 
 
-def search_dict_subdir(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, both_dir_key=None, after_subdir='', ignore_key=None):
+def search_dict_subdir(dict_data, basedir, pkl_name, ext='joblib', value_dir_key=None, both_dir_key=None, after_subdir='', ignore_key=None, pop=True):
     '''
     比较参数,如果参数不同,则返回False,如果参数相同,则返回对应文件夹,这个函数会遍历basedir下面的所有一级子文件夹,然后在每个一级子文件夹内的after_subdir文件夹下查找pkl文件
 
@@ -2465,6 +2577,10 @@ def search_dict_subdir(dict_data, basedir, pkl_name, ext='joblib', value_dir_key
     bool: 是否找到对应的文件
     '''
     local_dict_data, basedir = pop_dict_get_dir(dict_data, value_dir_key, both_dir_key, basedir)
+    if pop:
+        pass
+    else:
+        local_dict_data = dict_data.copy()
     if not os.path.exists(basedir):
         return None, False
     for time_dir in get_subdir(basedir):
@@ -2727,6 +2843,138 @@ def split_array(arr, axis, n):
     return [arr[(slice(None),) * axis + (s,)] for s in slices]
 
 
+def _check_process_num_func_args_kwargs(process_num, func_list, args_list, kwargs_list):
+    '''
+    检查process_num, args_list, kwargs_list的长度是否符合要求
+    注意:
+    用户必须确保args_list,kwargs_list,func_list的长度相同
+    process_num必须等于len(func_list)或者1
+    '''
+    len_set = {len(func_list), len(args_list), len(kwargs_list)}
+    if len(len_set) > 1:
+        raise ValueError("The length of func_list, args_list and kwargs_list must be the same.")
+    if process_num != 1 and process_num != len(func_list):
+        raise ValueError("The process_num must be equal to the length of func_list or 1.")
+
+
+def basic_multi_process(process_num, func_list, args_list=None, kwargs_list=None, task_name=''):
+    '''
+    最基础的multi_process
+
+    参数:
+    - process_num: int, 并行处理的进程数
+    - func_list: list, 要并行处理的函数列表
+    - args_list: list, 函数的位置参数列表
+    - kwargs_list: list, 函数的关键字参数列表
+    - task_name: str, 任务的名称(也可以输入函数的名称等需要显示的信息)
+    注意:
+    用户必须确保args_list,kwargs_list,func_list的长度相同
+    process_num必须等于len(func_list)或者1
+    '''
+    _check_process_num_func_args_kwargs(process_num, func_list, args_list, kwargs_list)
+
+    if process_num > 1 and check_if_multiprocessing():
+        print_title('unable to use multiprocessing inside a multiprocessing process, use single process instead')
+        process_num = 1
+
+    if process_num != 1:
+        print_title(f"Start {task_name} with {process_num} processes")
+        results = []
+        # 使用 ProcessPoolExecutor 进行多进程处理
+        with ProcessPoolExecutor(max_workers=process_num) as executor:
+            # 提交任务
+            futures = [executor.submit(func, *args, **kwargs) for func, args, kwargs in zip(func_list, args_list, kwargs_list)]
+
+            # 等待所有future对象按照提交的顺序完成，并收集结果
+            for future in futures:
+                try:
+                    # 这里按照futures的顺序获取结果，保证结果的顺序与提交顺序相同
+                    results.append(future.result())
+                except Exception as e:
+                    results.append(None)
+                    print(f"An error occurred: {e}")
+        print_title(f"Finish {task_name}")
+        return results
+    elif process_num == 1:
+        return [func(*args, **kwargs) for func, args, kwargs in zip(func_list, args_list, kwargs_list)]
+
+
+def _prepare_for_multi_process(process_num, func_list, args_list, kwargs_list):
+    '''
+    注意:
+    当func_list,args_list,kwargs_list的len为1时,其会被自动广播到最大的一方
+    假如args_list = [(1), (2)]这样的写法是不对的,至少要让里面成为元组,即args_list = [(1,), (2,)]
+    假如已经在multi_process中,继续使用multi_process会自动转为单进程运行(此时args_list和kwargs_list会被flatten)
+    '''
+    # 确认输入的都是list或者None
+    if (not isinstance(func_list, list)):
+        raise ValueError("func_list must be a list")
+    if (not isinstance(args_list, list)) and (args_list is not None):
+        raise ValueError("args_list must be a list or None")
+    if (not isinstance(kwargs_list, list)) and (kwargs_list is not None):
+        raise ValueError("kwargs_list must be a list or None")
+    
+    # 处理None(args_list和kwargs_list本身为None)
+    if args_list is None:
+        args_list = [()]
+    if kwargs_list is None:
+        kwargs_list = [{}]
+
+    # 处理长度不一致的情况
+    max_length = max(len(func_list), len(args_list), len(kwargs_list))
+    if len(func_list) != max_length:
+        if len(func_list) == 1:
+            func_list = func_list * max_length
+        else:
+            raise ValueError("The length of func_list must be equal to max_length or 1.")
+    if len(args_list) != max_length:
+        if len(args_list) == 1:
+            args_list = args_list * max_length
+        else:
+            raise ValueError("The length of args_list must be equal to max_length or 1.")
+    if len(kwargs_list) != max_length:
+        if len(kwargs_list) == 1:
+            kwargs_list = kwargs_list * max_length
+        else:
+            raise ValueError("The length of kwargs_list must be equal to max_length or 1.")
+    
+    # 处理None(args_list和kwargs_list内部的None)
+    for i, args in enumerate(args_list):
+        if args is None:
+            args_list[i] = ()
+    for i, kwargs in enumerate(kwargs_list):
+        if kwargs is None:
+            kwargs_list[i] = {}
+
+    return process_num, func_list, args_list, kwargs_list
+
+
+def _run_multi_func(func_list, args_list, kwargs_list):
+    '''
+    运行多函数
+    '''
+    return [func(*args, **kwargs) for func, args, kwargs in zip(func_list, args_list, kwargs_list)]
+
+
+def multi_process_for_different_func(process_num, func_list, args_list=None, kwargs_list=None, task_name=''):
+    '''
+    多进程并行处理不同的函数,相较basic_multi_process,增添了以下功能
+    
+    自动广播:如果func_list,args_list,kwargs_list的len为1时,其会被自动广播到最大的一方(如果为None,则也自动设置)
+    自动切分:process_num不再被限制为只能是1或者len(func_list),而是可以是任意值,但是会自动切分func_list,args_list,kwargs_list
+    '''
+    process_num, func_list, args_list, kwargs_list = _prepare_for_multi_process(process_num, func_list, args_list, kwargs_list)
+
+    divided_func_list = split_list(func_list, process_num)
+    divided_args_list = split_list(args_list, process_num)
+    divided_kwargs_list = split_list(kwargs_list, process_num)
+
+    new_func_list = [_run_multi_func] * process_num
+    new_args_list = [()] * process_num
+    new_kwargs_list = [{'func_list': divided_func_list[i], 'args_list': divided_args_list[i], 'kwargs_list': divided_kwargs_list[i]} for i in range(process_num)]
+    return flatten_list(basic_multi_process(process_num, func_list=new_func_list, args_list=new_args_list, kwargs_list=new_kwargs_list, task_name=task_name), level=1)
+
+
 def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name=''):
     '''
     多进程并行处理函数
@@ -2739,58 +2987,11 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name
     - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
-    假如args_list和kwargs_list的长度等于1,则会将其扩展到process_num
     假如args_list = [(1), (2)]这样的写法是不对的,至少要让里面成为元组,即args_list = [(1,), (2,)]
     假如已经在multi_process中,继续使用multi_process会自动转为单进程运行(此时args_list和kwargs_list会被flatten)
     '''
-    if process_num > 1 and check_if_multiprocessing():
-        print_title('unable to use multiprocessing inside a multiprocessing process, use single process instead')
-        process_num = 1
-    if args_list is None:
-        args_list = [()]
-    if kwargs_list is None:
-        kwargs_list = [{}]
-    for i, args in enumerate(args_list):
-        if args is None:
-            args_list[i] = ()
-    for i, kwargs in enumerate(kwargs_list):
-        if kwargs is None:
-            kwargs_list[i] = {}
-    if len(args_list) != process_num:
-        if len(args_list) == 1:
-            args_list = args_list * process_num
-        elif process_num == 1:
-            args_list = flatten_list(args_list, level=1)
-        else:
-            raise ValueError("The length of args_list must be equal to process_num or 1.")
-    if len(kwargs_list) != process_num:
-        if len(kwargs_list) == 1:
-            kwargs_list = kwargs_list * process_num
-        elif process_num == 1:
-            kwargs_list = flatten_list(kwargs_list, level=1)
-        else:
-            raise ValueError("The length of kwargs_list must be equal to process_num or 1.")
-
-    if process_num != 1:
-        print_title(f"Start {func_name} with {process_num} processes")
-        results = []
-        # 使用 ProcessPoolExecutor 进行多进程处理
-        with ProcessPoolExecutor(max_workers=process_num) as executor:
-            # 提交任务
-            futures = [executor.submit(func, *args, **kwargs) for args, kwargs in zip(args_list, kwargs_list)]
-            
-            # 等待所有future对象按照提交的顺序完成，并收集结果
-            for future in futures:
-                try:
-                    # 这里按照futures的顺序获取结果，保证结果的顺序与提交顺序相同
-                    results.append(future.result())
-                except Exception as e:
-                    results.append(None)
-                    print(f"An error occurred: {e}")
-        print_title(f"Finish {func_name}")
-        return results
-    elif process_num == 1:
-        return [func(*args, **kwargs) for args, kwargs in zip(args_list, kwargs_list)]
+    func_list = [func] * process_num
+    return multi_process_for_different_func(process_num, func_list, args_list, kwargs_list, func_name)
 
 
 def part_list_for(func, for_list, for_idx_name, *args, **kwargs):
@@ -3362,11 +3563,11 @@ def get_sub_dict(d, keys):
 
 def update_dict(original_dict, new_dict):
     '''更新字典'''
+    if original_dict is None:
+        original_dict = {}
     if new_dict is None:
         return original_dict.copy()
     else:
-        if original_dict is None:
-            original_dict = {}
         return {**original_dict, **new_dict}
 
 
@@ -3379,6 +3580,121 @@ def update_dict_ignore(original_dict, new_dict, ignore_value_list=None):
         if value in ignore_value_list:
             local_new_dict.pop(key)
     return update_dict(original_dict, local_new_dict)
+
+
+def adjust_dict_key(d, key_map):
+    '''
+    调整字典的键名
+
+    参数:
+    - d: 原始字典
+    - key_map: function, 键名映射关系
+    '''
+    new_dict = {}
+    for k, v in d.items():
+        new_key = key_map(k)
+        new_dict[new_key] = v
+    return new_dict
+# endregion
+
+
+# region data container
+class DataContainer(dict):
+    """
+    数据容器,内部是字典,但是可以使用kwargs访问value
+    自动按参数名首字母顺序生成键的数据容器,无需指定param_order
+    """
+    def __init__(self):
+        super().__init__()
+        self['_params_map'] = {}
+    
+    def _build_key(self, **kwargs):
+        """按参数名首字母顺序生成下划线连接的键"""
+        sorted_params = sorted(kwargs.keys())  # 参数名按字母顺序排序
+        parts = [str(kwargs[param]) for param in sorted_params]
+        if not parts:
+            raise ValueError("至少需要提供一个有效参数")
+        return cat(*parts)
+
+    def set_value(self, value, **kwargs):
+        key = self._build_key(**kwargs)
+        self[key] = value
+        self['_params_map'][key] = kwargs.copy()  # 保存参数信息
+    
+    def get_value(self, **kwargs):
+        key = self._build_key(**kwargs)
+        return self.get(key, None)
+    
+    def save(self):
+        '''
+        按照各类dict的函数存即可
+        '''
+        pass
+
+    def load(self):
+        '''
+        按照各类dict的函数读取即可
+        '''
+        pass
+
+
+class OrderedDataContainer(DataContainer):
+    '''
+    数据容器,内部是字典,但是可以使用kwargs访问value
+
+    使用示例:
+    dc = DataContainer(param_order=['area', 'property', 'time_period'])
+    dc.set_value(area='V1', property='spike', time_period='pre_stimulus_period', value=1)
+    dc.get_value(area='V1', property='spike', time_period='pre_stimulus_period')  # 返回 1
+
+    可以不输入完全的参数
+    dc.set_value(area='V1', property='spike', value=1)
+    dc.get_value(area='V1', property='spike')  # 返回 1
+
+    可以从另一个DataContainer中合并数据
+    dc2 = DataContainer(param_order=['area', 'property', 'time_period'])
+    dc2.set_value(area='V1', property='spike', time_period='stimulus_period', value=2)
+    dc.merge_from(dc2)
+    '''
+    def __init__(self, param_order):
+        super().__init__()
+        self['_param_order'] = param_order
+    
+    def _build_key(self, **kwargs):
+        """按param_order顺序构建下划线连接的键名"""
+        # 验证参数是否合法
+        for param in kwargs:
+            if param not in self['_param_order']:
+                raise ValueError(f"参数 '{param}' 不在预定义顺序 {self['_param_order']} 中")
+        # 按顺序拼接有效参数值
+        parts = []
+        for param in self['_param_order']:
+            if param in kwargs:
+                parts.append(str(kwargs[param]))
+        if not parts:
+            raise ValueError("至少需要提供一个有效参数")
+        return cat(*parts)
+
+    def merge_from(self, other_container):
+        """
+        合并另一个 DataContainer 或 OrderedDataContainer 的数据
+        并根据当前容器的参数顺序重新生成键
+        """
+        if not isinstance(other_container, DataContainer):
+            raise TypeError("仅支持合并 DataContainer 或其子类实例")
+
+        for key in other_container:
+            if key in ['_param_order', '_params_map']:
+                continue  # 跳过内部参数顺序标记
+            # 获取原键对应的参数信息
+            if key not in other_container['_params_map']:
+                raise KeyError(f"Key '{key}' 不在输入的 data_container 的 _params_map 中, 这可能是因为它不是通过 set_value 方法设置的")
+            else:
+                params_from_other = other_container['_params_map'][key]
+            # 生成新键并存储
+            new_key = self._build_key(**params_from_other)
+            self[new_key] = other_container[key]
+            self['_params_map'][new_key] = params_from_other
 # endregion
 
 
@@ -4323,6 +4639,19 @@ def get_class_name(cls):
 
 def is_class(obj):
     return inspect.isclass(obj)
+
+
+def add_method_to_instance(instance, method_func, method_name):
+    """
+    将方法动态添加到一个实例中。
+    
+    参数:
+        instance: 目标实例
+        method_func: 要添加的函数,需包含self参数
+        method_name: 添加后的方法名称
+    """
+    bound_method = types.MethodType(method_func, instance)
+    setattr(instance, method_name, bound_method)
 # endregion
 
 
@@ -5668,32 +5997,39 @@ def get_ks(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
 
     参数:
     x - 第一个数组
-    y - 第二个数组
+    y - 第二个数组或者CDF函数
 
     返回:
     ks_distance - 两个数组的KS距离
     '''
-    x = process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    y = process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    return st.ks_2samp(x, y).statistic
+    return get_ks_result(x, y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)['ks']
 
 
-def get_ks_and_p(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
+def get_ks_result(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
     '''
     计算两个数组的Kolmogorov-Smirnov距离及其P值,注意当分布一样时,KS距离为0,而P值为1
 
     参数:
     x - 第一个数组
-    y - 第二个数组
+    y - 第二个数组或者CDF函数
 
     返回:
     ks_distance - 两个数组的KS距离
     p_value - 对应的P值
     '''
-    x = process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    y = process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    ks_distance, p_value = st.ks_2samp(x, y)
-    return ks_distance, p_value
+    # 处理输入x的特殊值
+    x_clean = process_special_value(x, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    
+    if callable(y):
+        # 单样本检验：y是CDF函数
+        ks_result = st.kstest(x_clean, y)
+    else:
+        # 双样本检验：处理y的特殊值后计算
+        y_clean = process_special_value(y, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+        ks_result = st.ks_2samp(x_clean, y_clean)
+    
+    r = {'ks': ks_result.statistic, 'p': ks_result.pvalue}
+    return r
 
 
 def get_kl_divergence(p, q, base=None, **kwargs):
@@ -6135,6 +6471,368 @@ def repeat_data(data, repeat_times):
 # endregion
 
 
+# region 基础模型
+class MetaModel(abc.ABC):
+    '''
+    一个元模型的基类，用于封装模型的参数设置,读取,保存;cpu,gpu设置;备份代码;设置logger等功能
+    '''
+    def __init__(self):
+        self.force_run = False
+        self.simulation_results = {} # 直接结果(simulation得到的),如果需要可以在子类改成DataContainer
+        self.analysis_results = {} # 分析结果(analysis得到的),如果需要可以在子类改成DataContainer
+        self.pop = False
+        self.value_dir_key = []
+        self.both_dir_key = []
+        self.ignore_key_list = []
+
+    # region set things
+    def set_up(self, params, basedir, code_file_list, value_dir_key=None, both_dir_key=None, ignore_key_list=None, force_run=False):
+        '''
+        总体设置
+        '''
+        self.set_params(params=params)
+        self.set_basedir(basedir=basedir)
+        self.set_value_dir_both_dir_key(value_dir_key=value_dir_key, both_dir_key=both_dir_key)
+        self.set_ignore_key_for_search_params(ignore_key_list=ignore_key_list)
+        self.create_timedir()
+        self.set_code_file_list(code_file_list=code_file_list)
+        self.set_force_run(force_run=force_run)
+
+    def set_force_run(self, force_run=False):
+        '''
+        设置模型的强制运行标志,默认为False,会尝试读取已有结果,如果为True,则无条件运行模型
+        '''
+        self.force_run = force_run
+
+    def set_basedir(self, basedir):
+        '''
+        设置模型的基础文件夹
+        
+        示例:
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+        这样可以根据代码文件名自动创建文件夹
+
+        注意:
+        basedir和timedir是不同的
+        '''
+        self.basedir = basedir
+
+    def set_timedir(self, timedir):
+        '''
+        设置模型的时间文件夹
+
+        示例:
+        当已经手动确定了模型的时间文件夹时,可以直接设置,方便之后运行analysis
+
+        注意:
+        只有在希望单独运行analysis时才需要设置
+        '''
+        self.timedir = timedir
+        self.load_params()
+
+    def set_value_dir_both_dir_key(self, value_dir_key=None, both_dir_key=None):
+        '''
+        设置模型的value_dir_key和both_dir_key
+
+        注意:
+        输入none则不更新
+        '''
+        if value_dir_key is not None:
+            self.value_dir_key = value_dir_key
+        if both_dir_key is not None:
+            self.both_dir_key = both_dir_key
+
+    def set_ignore_key_for_search_params(self, ignore_key_list=None):
+        '''
+        设置搜索参数时忽略的key
+
+        注意:
+        输入none则不更新
+        '''
+        if ignore_key_list is not None:
+            self.ignore_key_list = ignore_key_list
+
+    def set_pop(self, pop):
+        '''
+        设置pop(储存params时是否pop掉value_dir_key和both_dir_key再保存)
+        '''
+        self.pop = pop
+
+    def set_params(self, params, set_to_attr=True):
+        '''
+        设置模型参数
+        '''
+        if set_to_attr:
+            for key, value in params.items():
+                setattr(self, key, value)
+        self.params = params
+
+    def set_analysis_task(self, analysis_task_list):
+        '''
+        设置分析结果的task列表
+        '''
+        self.analysis_task_list = analysis_task_list
+
+    def set_gpu(self, id=None):
+        '''
+        设置模型在GPU上运行
+        '''
+        if id is None:
+            set_least_used_gpu()
+        else:
+            set_gpu(id)
+
+    def set_code_file_list(self, code_file_list):
+        '''
+        设置模型代码文件列表
+
+        示例:
+        code_file_list = [cf.current_file(), '../../utils_function/utils_function.py']
+        '''
+        self.code_file_list = code_file_list
+
+    def set_logger(self, filename=None, filemode='a'):
+        '''
+        设置logger
+        '''
+        self.logger = Logger()
+        self.logger.get_py_logger(basedir=self.logs_dir, filename=filename, filemode=filemode)
+    
+    def extend_ignore_key_list(self, *new_ignore_key):
+        '''
+        向ignore_key_list中添加新的key
+        '''
+        self.ignore_key_list.extend(new_ignore_key)
+
+    def extend_value_dir_key(self, *new_value_dir_key):
+        '''
+        向value_dir_key中添加新的key
+        '''
+        self.value_dir_key.extend(new_value_dir_key)
+
+    def extend_both_dir_key(self, *new_both_dir_key):
+        '''
+        向both_dir_key中添加新的key
+        '''
+        self.both_dir_key.extend(new_both_dir_key)
+    # endregion
+
+    # region run
+    @property
+    def should_run(self):
+        """
+        判断是否需要执行run_detail的逻辑聚合
+        """
+        if not self.params_exist:
+            # 当参数不存在时，强制标记结果不存在
+            self.simulation_results_exist = False
+            return True
+        return not self.simulation_results_exist
+
+    def run(self):
+        '''
+        运行模型
+        '''
+        self.search_params()
+        
+        # 自动触发结果存在性检查(当参数存在时)
+        if self.params_exist:
+            self.check_simulation_results_exist()
+
+        # 统一设置日志(此时timedir已确定)
+        self.set_logger()
+
+        # 通过属性判断执行
+        if self.should_run:
+            with WithTimer('Run'):
+                self.run_detail()
+            
+        self.finalize_run()
+
+    def simulate(self):
+        '''
+        run的别名
+        '''
+        self.run()
+
+    @abc.abstractmethod
+    def run_detail(self):
+        """
+        子类必须实现核心逻辑,需要将结果更新到self.simulation_results
+        """
+        pass
+
+    def finalize_run(self):
+        """
+        run的收尾操作
+        """
+        if not self.simulation_results_exist:
+            self.save_params()
+            self.save_simulation_results()
+        self.save_code()
+    # endregion
+
+    # region analysis
+    def analyze_detail(self):
+        '''
+        子类可实现
+        '''
+        pass
+
+    def analyze(self):
+        '''
+        运行分析
+        '''
+        with WithTimer('Analyze'):
+            self.analyze_detail()
+            self.save_analysis_results()
+    # endregion
+
+    # region dir
+    def create_timedir(self):
+        '''
+        获取模型的时间文件夹
+        '''
+        _, self.timedir = pop_dict_get_dir(self.params, self.value_dir_key, self.both_dir_key, self.basedir)
+        self.current_time = get_time()
+        self.timedir = pj(self.timedir, self.current_time)
+
+    @property
+    def logs_dir(self):
+        dir_dict = get_common_subdir_dict(self.timedir, ['logs'])
+        return dir_dict['logs']
+
+    @property
+    def figs_dir(self):
+        dir_dict = get_common_subdir_dict(self.timedir, ['figs'])
+        return dir_dict['figs']
+    
+    @property
+    def models_dir(self):
+        dir_dict = get_common_subdir_dict(self.timedir, ['models'])
+        return dir_dict['models']
+    
+    @property
+    def outcomes_dir(self):
+        dir_dict = get_common_subdir_dict(self.timedir, ['outcomes'])
+        return dir_dict['outcomes']
+
+    @property
+    def params_dir(self):
+        dir_dict = get_common_subdir_dict(self.timedir, ['params'])
+        return dir_dict['params']
+
+    @property
+    def code_dir(self):
+        '''
+        用于保存备份代码
+        '''
+        dir_dict = get_common_subdir_dict(self.timedir, ['code'])
+        return dir_dict['code']
+    # endregion
+
+    # region load
+    def search_params(self):
+        '''
+        搜索运行过相同参数的文件夹
+        '''
+        if self.force_run:
+            print_title('Force run')
+            self.params_exist = False
+        else:
+            self.params_exist_timedir, self.params_exist = search_dict_subdir(dict_data=self.params, basedir=self.basedir, pkl_name='params', value_dir_key=self.value_dir_key, both_dir_key=self.both_dir_key, after_subdir='params', ignore_key=self.ignore_key_list, pop=self.pop)
+            if self.params_exist:
+                print_title('Params exist')
+                self.original_timedir = self.timedir
+                self.timedir = self.params_exist_timedir
+            else:
+                print_title('Params do not exist')
+
+    def check_simulation_results_exist(self):
+        '''
+        检查simulation结果是否存在
+
+        注意:
+        如果params_exist但是simulation_results不存在,说明之前的运行被中断了,需要重新运行,此时会新开一个timedir,而由于params_exist,timedir被设置为params_exist_timedir,所以需要在这里恢复timedir
+        '''
+        self.simulation_results_exist = check_saved_dict_completeness(save_dir=pj(self.outcomes_dir, 'simulation_results'))
+        if self.simulation_results_exist:
+            print_title('Simulation results exist')
+        else:
+            print_title('Simulation results do not exist')
+            self.timedir = self.original_timedir # 恢复timedir
+
+    def load_params(self):
+        '''
+        读取模型参数
+        '''
+        self.params = load_pkl(pj(self.params_dir, 'params'))
+        self.set_params(self.params)
+
+    def load_simulation_results(self):
+        '''
+        读取直接结果
+        '''
+        self.simulation_results = load_dict_separate(pj(self.outcomes_dir, 'simulation_results'))
+
+    def get_value_from_simulation_results(self, key):
+        '''
+        从直接结果中获取值
+
+        此实现方式避免了一次性读取所有直接结果,节省内存
+        '''
+        if key in self.simulation_results:
+            return self.simulation_results[key]
+        else:
+            partial_simulation_results = load_dict_separate(pj(self.outcomes_dir, 'simulation_results'), key_to_load=[key])
+            self.simulation_results.update(partial_simulation_results)
+            return partial_simulation_results[key]
+    
+    def get_simulation_value(self, key):
+        '''
+        get_value_from_simulation_results的简称
+        '''
+        return self.get_value_from_simulation_results(key)
+    # endregion
+
+    # region save
+    def save_code(self):
+        '''
+        备份模型代码
+        '''
+        # 保存code_file
+        for code_file in self.code_file_list:
+            save_code_copy(self.code_dir, code_file)
+        # 保存CF_DIR下的所有函数
+        for sub_file in get_subfile(CF_DIR):
+            if sub_file.endswith('.py'):
+                save_code_copy(self.code_dir, sub_file)
+
+    def save_params(self):
+        '''
+        保存模型参数
+        '''
+        save_timed_dir_dict(dict_data=self.params, basedir=self.basedir, dict_name='params', value_dir_key=self.value_dir_key, both_dir_key=self.both_dir_key, after_timedir='params', current_time=self.current_time, pop=self.pop)
+        print_title('Params saved')
+
+    def save_simulation_results(self):
+        '''
+        保存simulation结果
+        '''
+        save_dict_separate(self.simulation_results, pj(self.outcomes_dir, 'simulation_results'))
+        print_title('Simulation results saved')
+    
+    def save_analysis_results(self):
+        '''
+        保存分析结果
+        '''
+        save_dict_separate(self.analysis_results, pj(self.outcomes_dir, 'analysis_results'))
+        print_title('Analysis results saved')
+    # endregion
+# endregion
+
+
 # region 参数优化相关函数
 def search_optimal_param():
     pass
@@ -6329,40 +7027,48 @@ def get_iterable_ax_for_decorator(ax):
         return ax, False
 
 
-def iterate_over_axs(func):
+def iterate_over_obj(func, obj_name):
     """
-    装饰器：将 'ax' 参数转换为可迭代对象，并对每个元素调用原始函数。
+    装饰器：将 obj_name 参数转换为可迭代对象，并对每个元素调用原始函数。
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # 获取 'ax' 参数的值
-        ax = get_param_value(func, args, kwargs, 'ax')
-        iterable_ax, is_iterable = get_iterable_ax_for_decorator(ax)  # 将 ax 转换为可迭代对象
+        # 获取 obj_name 参数的值
+        obj = get_param_value(func, args, kwargs, obj_name)
+        iterable_obj, is_iterable = get_iterable_ax_for_decorator(obj)  # 将 obj 转换为可迭代对象
         if is_iterable:
             results = []
 
             # 获取函数签名，并动态绑定位置参数和关键字参数
             signature = inspect.signature(func)
 
-            # 遍历 iterable_ax 的每个元素，并替换 'ax' 参数
-            for item in iterable_ax:
-                # 重新绑定参数，将 'ax' 替换为 item
+            # 遍历 iterable_obj 的每个元素，并替换 obj_name 参数
+            for item in iterable_obj:
+                # 重新绑定参数，将 obj_name 替换为 item
                 bound_args = signature.bind(*args, **kwargs)
                 bound_args.apply_defaults()  # 应用默认参数
 
-                # 将 'ax' 参数替换为当前的 item
-                bound_args.arguments['ax'] = item
+                # 将 obj_name 参数替换为当前的 item
+                bound_args.arguments[obj_name] = item
 
                 # 调用原始函数，传入修改后的参数
                 result = func(*bound_args.args, **bound_args.kwargs)
                 results.append(result)
 
-            # 重构结果，使其与原来的 ax 形状相匹配
-            return rebuild_ax(results, ax)
+            # 重构结果，使其与原来的 obj 形状相匹配
+            return rebuild_ax(results, obj)
         else:
             return func(*args, **kwargs)
 
     return wrapper
+
+
+def iterate_over_axs(func):
+    return iterate_over_obj(func, 'ax')
+
+
+def iterate_over_subfigs(func):
+    return iterate_over_obj(func, 'subfig')
 
 
 def rebuild_ax(flatten_ax, original_ax):
@@ -10283,7 +10989,7 @@ def plt_two_side_bar(ax, x, y1, y2, label1=None, label2=None, width=BAR_WIDTH, c
     plt_bar(ax, x, -np.array(y2), label=label2, color=color2, vert=vert, equal_space=equal_space,
                  err=yerr2, capsize=capsize, ecolor=ecolor2, elabel=elabel2, width=width, **kwargs)
 
-    local_max = np.nanmax([np.nanmax(y1), np.nanmax(y2)])
+    local_max = np.nanmax([np.nanmax(y1), np.nanmax(y2)]) * 1.2
     if vert:
         axis = 'y'
     else:
@@ -10746,8 +11452,8 @@ def plt_compare_cdf_ks(ax, data1, data2, label1=None, label2=None, color1=BLUE, 
     plt_cdf(ax, data1, label=label1, color=color1, vert=vert, **cdf_kwargs)
     plt_cdf(ax, data2, label=label2, color=color2, vert=vert, **cdf_kwargs)
 
-    ks, p = get_ks_and_p(data1, data2)
-    text_dict = {'KS': ks, 'P': p}
+    r = get_ks_result(data1, data2)
+    text_dict = {'KS': r['ks'], 'P': r['p']}
     add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
 
 
@@ -10998,6 +11704,38 @@ def plt_pp_plot(ax, data_x, data_y, n_points=None, scatter_color=BLUE, line_colo
 def plt_advance_quiver(ax):
     'https://matplotlib.org/stable/gallery/images_contours_and_fields/quiver_demo.html#sphx-glr-gallery-images-contours-and-fields-quiver-demo-py'
     pass
+# endregion
+
+
+# region 复杂作图函数(matplotlib系列,输入dict使用)
+def plt_group_bar_dict(ax, data, width=None, colors=CMAP, vert=True, **kwargs):
+    """
+    使用字典数据绘制分组的柱状图。
+    
+    :param ax: matplotlib的轴对象
+    :param data: 字典格式输入,结构为: {'A': {'x': 1, 'y': 2, 'z': 3}, 'B': {'x': 4, 'y': 5, 'z': 6}}
+    :param width: 柱子宽度 (逻辑同原函数)
+    :param colors: 颜色配置 (逻辑同原函数)
+    :param vert: 是否垂直柱状图
+    :param kwargs: 其他plt.bar参数
+    """
+    # 提取分组标签 (x轴标签)
+    x_labels = list(data.keys())
+    
+    # 提取子组标签并验证一致性
+    subgroup_labels = list(next(iter(data.values())).keys())  # 取第一个分组的子组作为标准
+    for group, subgroups in data.items():
+        if set(subgroups.keys()) != set(subgroup_labels):
+            raise ValueError(f"分组 '{group}' 的子组标签与首分组不一致")
+    
+    # 构造二维y值数组
+    y_values = [
+        [subgroups[sub] for sub in subgroup_labels]
+        for groups, subgroups in data.items()
+    ]
+    
+    # 调用原始函数绘图
+    return plt_group_bar(ax=ax, x=x_labels, y=y_values, label_list=subgroup_labels, width=width, colors=colors, vert=vert, **kwargs)
 # endregion
 
 
@@ -11329,11 +12067,11 @@ def plt_scatter_heatmap(ax, color_data, size_data, cmap=HEATMAP_CMAP, edgecolor=
 
 def plt_group_bar_df(ax, df, bar_width=None, group_by='columns', colors=CMAP, vert=True, **kwargs):
     '''
-    基于DataFrame绘制分组的柱状图，根据分组是按照行还是列来自动处理。
+    基于DataFrame绘制分组的柱状图,根据分组是按照行还是列来自动处理。
     :param ax: matplotlib的轴对象,用于绘制图形
     :param df: 数据存放的DataFrame
     :param bar_width: 单个柱子的宽度,默认为None,自动确定宽度
-    :param group_by: 指定分组数据是按行('rows')还是按列('columns')，默认为'columns'
+    :param group_by: 指定分组数据是按行('rows')还是按列('columns'),默认为'columns'
     :param colors: 每个分组的颜色列表;也可以指定cmap,默认为CMAP,然后自动生成颜色序列
     :param vert: 是否是垂直的柱状图,默认为True
     :param kwargs: 其他plt.bar支持的参数
@@ -12070,16 +12808,16 @@ def point_to_ax_proportion(ax, point, axis='x'):
 # region 通用函数(ax_size)
 def get_ax_size(ax):
     '''
-    获取给定轴的尺寸（以英寸为单位）。
+    获取给定轴的尺寸(以英寸为单位)
     
     参数:
-    - ax: matplotlib轴对象。
+    - ax: matplotlib轴对象
     
     返回:
-    - ax_width: 轴的宽度（英寸）。
-    - ax_height: 轴的高度（英寸）。
+    - ax_width: 轴的宽度(英寸)
+    - ax_height: 轴的高度(英寸)
     '''
-    # 获取图形的尺寸（英寸）
+    # 获取图形的尺寸(英寸)
     fig = ax.get_figure()
     fig_width, fig_height = fig.get_size_inches()
     
@@ -12673,6 +13411,14 @@ def adjust_label(ax, axis, **kwargs):
     elif axis == 'z':
         ax.set_zlabel(get_label_text(ax, axis), **kwargs)
 
+@iterate_over_axs
+def rm_ax_xlabel(ax):
+    ax.set_xlabel('')
+
+@iterate_over_axs
+def rm_ax_ylabel(ax):
+    ax.set_ylabel('')
+
 
 def get_title_obj(ax):
     return ax.title
@@ -12837,13 +13583,10 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
 
     # 设置tick
     if xtick is not None:
-        # ax.set_xticks(xtick, labels=xtick_label)
         set_ax_tick(ax, ticks=xtick, labels=xtick_label, axis='x')
     if ytick is not None:
-        # ax.set_yticks(ytick, labels=ytick_label)
         set_ax_tick(ax, ticks=ytick, labels=ytick_label, axis='y')
     if is_3d and ztick is not None:
-        # ax.set_zticks(ztick, labels=ztick_label)
         set_ax_tick(ax, ticks=ztick, labels=ztick_label, axis='z')
 
     # 设置字体
@@ -13102,18 +13845,26 @@ def get_fig(width=AX_WIDTH, height=AX_HEIGHT, dpi=FIG_DPI, **kwargs):
     '''
     return plt.figure(figsize=(width, height), dpi=dpi, **kwargs)
 
+@iterate_over_subfigs
+def set_subfig_size_inches(subfig, ncols, nrows):
+    '''
+    为 subfig 设置一个 get_size_inches 方法, 使得可以通过 subfig.get_size_inches() 获取子图的大小
+    '''
+    def get_size_inches(self):
+        return (
+            self.figure.get_size_inches()[0] / ncols,
+            self.figure.get_size_inches()[1] / nrows
+        )
+    add_method_to_instance(subfig, get_size_inches, 'get_size_inches')
+
 
 def get_subfig(fig=None, nrows=1, ncols=1, squeeze=True, wspace=None, hspace=None, width_ratios=None, height_ratios=None, **kwargs):
     if fig is None:
         fig = plt.gcf()
     subfig = fig.subfigures(nrows=nrows, ncols=ncols, squeeze=squeeze, wspace=wspace, hspace=hspace, width_ratios=width_ratios, height_ratios=height_ratios, **kwargs)
 
-    # 动态给 subfigure 添加一个 get_size_inches 方法(因为set_ax需要使用figsize)
-    def get_size_inches(self):
-        return self.figure.get_size_inches()[0] / nrows, self.figure.get_size_inches()[1] / ncols
-
     for s in get_iterable_ax(subfig):
-        s.get_size_inches = get_size_inches.__get__(s)
+        set_subfig_size_inches(s, ncols, nrows)
     return subfig
 
 
@@ -13517,21 +14268,42 @@ def get_gs_inside_gs(gs, index=None, nrows=1, ncols=1, wspace=None, hspace=None,
 # region 通用函数(创建visualizer)
 class SingleVisualizer:
     '''
-    快捷的可视化单个对象
+    可视化单个对象
     '''
     def __init__(self, title):
         self.title = title
 
 
-class MultiVisualizer:
+class MultiVisualizer(SingleVisualizer):
     '''
-    快捷的可视化多个对象
+    可视化多个对象
+
+    MultiVisualizer本身也可以作为一个SingleVisualizer,从而可以嵌套使用
+    例如:
+    每个脑区拥有一个SingleVisualizer
+    全脑拥有多个脑区的SingleVisualizer,成为MultiVisualizer
+    全脑的不同参数,可以以全脑的MultiVisualizer作为一个SingleVisualizer
     '''
-    def __init__(self, single_visualizer_list):
+    def __init__(self, single_visualizer_list, save_fig_kwargs=None, fig_title_list=None, title=None):
         self.title_list = [single_visualizer.title for single_visualizer in single_visualizer_list]
-        self.single_visualizer_list = single_visualizer_list
-        self.num = len(single_visualizer_list)
+        self.single_visualizer_list = single_visualizer_list.copy()
+        self.update_save_fig_kwargs(save_fig_kwargs)
+        self.set_fig_title_list(fig_title_list)
+        super().__init__(title=title)
     
+    @property
+    def num(self):
+        return len(self.single_visualizer_list)
+
+    def set_fig_title_list(self, fig_title_list=None):
+        '''
+        设置fig的标题(有时我们不希望使用title_list作为标题)
+        '''
+        if fig_title_list is None:
+            self.fig_title_list = self.title_list.copy()
+        else:
+            self.fig_title_list = fig_title_list.copy()
+
     def get_single_visualizer(self, title):
         '''
         获取单个visualizer
@@ -13540,7 +14312,47 @@ class MultiVisualizer:
             if single_visualizer.title == title:
                 return single_visualizer
 
-    def get_fig_subfig_ax(self, subfig_nrows, subfig_ncols, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
+    @contextlib.contextmanager
+    def temporary_disable(self, titles):
+        '''
+        利用with语句临时移除指定的visualizer
+
+        示例:
+        with multi_visualizer.temporary_disable(['title1', 'title2']):
+            multi_visualizer.get_fig_subfig_ax(...)
+            multi_visualizer.add_tag()
+        '''
+        try:
+            # 临时移除指定 visualizer
+            self._original_single_visualizer_list = self.single_visualizer_list.copy()
+            self._original_title_list = self.title_list.copy()
+            self._original_fig_title_list = self.fig_title_list.copy()
+
+            rm_idx = []
+            for title in titles:
+                idx = self.title_list.index(title)
+                rm_idx.append(idx)
+            self.single_visualizer_list = [single_visualizer for i, single_visualizer in enumerate(self.single_visualizer_list) if i not in rm_idx]
+            self.title_list = [title for i, title in enumerate(self.title_list) if i not in rm_idx]
+            self.fig_title_list = [fig_title for i, fig_title in enumerate(self.fig_title_list) if i not in rm_idx]
+            yield
+        finally:
+            # 恢复原始列表
+            self.single_visualizer_list = self._original_single_visualizer_list.copy()
+            self.title_list = self._original_title_list.copy()
+            self.fig_title_list = self._original_fig_title_list.copy()
+
+    @classmethod
+    def from_multi_visualizer_instance(cls, multi_visualizer_instance):
+        '''
+        从实例化的MultiVisualizer设定参数
+
+        示例:
+        new_multi_visualizer = MultiVisualizer.from_multi_visualizer_instance(multi_visualizer)
+        '''
+        return cls(copy.deepcopy(multi_visualizer_instance.single_visualizer_list), copy.deepcopy(multi_visualizer_instance.save_fig_kwargs), copy.deepcopy(multi_visualizer_instance.fig_title_list))
+
+    def get_fig_subfig_ax(self, subfig_nrows='auto', subfig_ncols='auto', separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
         '''
         获取fig和ax
 
@@ -13548,6 +14360,14 @@ class MultiVisualizer:
         subfig_nrows, subfig_ncols: 行数和列数(对于subfig而言,如果separate为True,则nrows和ncols无效)
         separate: True,则每个对象一个fig;False,每个对象一个subfig,但是所有对象一个fig
         '''
+        if subfig_nrows == 'auto' and subfig_ncols == 'auto':
+            raise ValueError('subfig_nrows and subfig_ncols cannot be both auto.')
+
+        if subfig_nrows == 'auto':
+            subfig_nrows = round(self.num / subfig_ncols)
+        if subfig_ncols == 'auto':
+            subfig_ncols = round(self.num / subfig_nrows)
+
         self.subfig_nrows = subfig_nrows
         self.subfig_ncols = subfig_ncols
         self.separate = separate
@@ -13567,12 +14387,21 @@ class MultiVisualizer:
                 self.ax_dict[title] = get_ax(fig=self.subfig_dict[title], **get_ax_kwargs)
         else:
             self.fig, subfig = get_fig_subfig(nrows=subfig_nrows, ncols=subfig_ncols, subfig_width=subfig_width, subfig_height=subfig_height, **get_fig_subfig_kwargs)
+            if self.num == 1:
+                subfig = np.array([[subfig]])
             subfig = subfig.flatten()
             for i, title in enumerate(self.title_list):
                 self.subfig_dict[title] = subfig[i]
                 self.ax_dict[title] = get_ax(fig=self.subfig_dict[title], **get_ax_kwargs)
 
         return self.subfig_dict, self.ax_dict
+
+    def set_external_fig_subfig_ax(self, subfig_dict, ax_dict):
+        '''
+        支持直接导入fig和subfig
+        '''
+        self.subfig_dict = subfig_dict
+        self.ax_dict = ax_dict
 
     def add_tag(self, **kwargs):
         '''
@@ -13583,20 +14412,25 @@ class MultiVisualizer:
         '''
         if self.separate:
             for ax in self.ax_dict.values():
-                add_axes_list_tag_by_order(ax, **kwargs)
+                add_axes_list_tag_by_order(np.array(ax).flatten(), **kwargs)
         else:
             ax_in_order = []
             for title in self.title_list:
-                ax_in_order.append(self.ax_dict[title].flatten())
-            ax_in_order = np.array(ax_in_order).flatten()
+                ax_in_order.append(self.ax_dict[title])
+            ax_in_order = flatten_list(pure_list(ax_in_order))
             add_axes_list_tag_by_order(ax_in_order, **kwargs)
 
     def add_subfig_title(self, **kwargs):
         '''
         为每个subfig添加标题
         '''
-        for title, subfig in self.subfig_dict.items():
-            set_fig_title(subfig, title, **kwargs)
+        for i in range(self.num):
+            subfig = self.subfig_dict[self.title_list[i]]
+            fig_title = self.fig_title_list[i]
+            set_fig_title(subfig, fig_title, **kwargs)
+
+    def rm_redundant_xylabel(self):
+        pass
 
     def add_rounded_rectangle():
         pass
@@ -13607,7 +14441,7 @@ class MultiVisualizer:
         '''
         for func, kwargs in zip(func_list, kwargs_list):
             func(**kwargs)
-    
+
     def multi_ax_plot_by_single_visualizer(self, func_name, kwargs_list):
         '''
         通过SingleVisualizer的方法在多个ax上作图
@@ -13640,8 +14474,8 @@ class MultiVisualizerByRow(MultiVisualizer):
     注意:
     仅仅支持每个subfig内部的ax只有一行
     '''
-    def __init__(self, single_visualizer_list):
-        super().__init__(single_visualizer_list)
+    def __init__(self, single_visualizer_list, save_fig_kwargs=None, fig_title_list=None):
+        super().__init__(single_visualizer_list, save_fig_kwargs, fig_title_list)
     
     def rm_redundant_xylabel(self):
         '''
@@ -13651,9 +14485,8 @@ class MultiVisualizerByRow(MultiVisualizer):
             pass
         else:
             for row, ax in enumerate(self.ax_dict.values()):
-                if row != 0:
-                    for col in range(1, self.ax_ncols):
-                        ax[col].set_xlabel('')
+                if row != self.ax_nrows-1:
+                    rm_ax_xlabel(ax)
 
     def get_fig_subfig_ax(self, subfig_ncols=1, separate=False, get_suitable_fig_size_kwargs=None, get_fig_subfig_kwargs=None, get_ax_kwargs=None):
         '''
@@ -13669,8 +14502,8 @@ class MultiVisualizerByCol(MultiVisualizer):
     注意:
     仅仅支持每个subfig内部的ax只有一列
     '''
-    def __init__(self, single_visualizer_list):
-        super().__init__(single_visualizer_list)
+    def __init__(self, single_visualizer_list, save_fig_kwargs=None, fig_title_list=None):
+        super().__init__(single_visualizer_list, save_fig_kwargs, fig_title_list)
     
     def rm_redundant_xylabel(self):
         '''
@@ -13681,8 +14514,7 @@ class MultiVisualizerByCol(MultiVisualizer):
         else:
             for col, ax in enumerate(self.ax_dict.values()):
                 if col != 0:
-                    for row in range(self.ax_nrows):
-                        ax[row].set_ylabel('')
+                    rm_ax_ylabel(ax)
 
     def add_tag(self, row_first=True, **kwargs):
         '''
@@ -13699,7 +14531,7 @@ class MultiVisualizerByCol(MultiVisualizer):
             else:
                 ax_in_order = []
                 for title in self.title_list:
-                    ax_in_order.append(self.ax_dict[title].flatten())
+                    ax_in_order.append(self.ax_dict[title])
                 ax_in_order = np.array(ax_in_order).T.flatten()
                 add_axes_list_tag_by_order(ax_in_order, **kwargs)
         else:
