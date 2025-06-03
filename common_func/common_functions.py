@@ -241,8 +241,8 @@ plt.rcParams['ytick.direction'] = TICK_DIRECTION   # y轴刻度线的方向
 plt.rcParams['axes.facecolor'] = AX_FACECOLOR  # 背景颜色
 plt.rcParams['figure.subplot.wspace'] = ADJUST_PARAMS_CUSTOM['wspace']  # 调整子图之间的间距
 plt.rcParams['figure.subplot.hspace'] = ADJUST_PARAMS_CUSTOM['hspace']  # 调整子图之间的间距
-# fm.fontManager.addfont(os.path.join(CF_DIR, 'font/arial.ttf'))  # Specify the path to your local Arial TTF file from https://github.com/gasharper/linux-fonts/blob/master/arial.ttf
-# plt.rcParams['font.family'] = 'Arial'  # Set Arial as the default font
+fm.fontManager.addfont(os.path.join(CF_DIR, 'font/arial.ttf'))  # Specify the path to your local Arial TTF file from https://github.com/gasharper/linux-fonts/blob/master/arial.ttf
+plt.rcParams['font.family'] = 'Arial'  # Set Arial as the default font
 # endregion
 
 
