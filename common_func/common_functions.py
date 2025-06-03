@@ -18,15 +18,16 @@ from multiprocessing import Process
 from pathlib import Path
 import inspect
 import types
-from functools import wraps, partial
+from functools import wraps, partial, lru_cache
 import importlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from io import StringIO
+from io import StringIO, BytesIO
 import copy
 import hashlib
 import json
 import logging
 from cProfile import Profile
+from line_profiler import LineProfiler
 from pstats import Stats
 import tracemalloc
 import itertools
@@ -35,7 +36,10 @@ import abc
 import glob
 import pdb
 import types
-from collections import defaultdict
+from collections import defaultdict, Counter
+import yaml
+import lmdb
+from pympler import asizeof
 
 
 # 数学和科学计算库
@@ -352,9 +356,12 @@ PROCESS_NUM = min(40, int(multiprocessing.cpu_count()/3))    # 默认multiproces
 
 # region 设定gpu
 def set_gpu(id):
+    '''
+    例子: set_gpu('0'), set_gpu("1,2,3")
+    '''
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = id  # specify which GPU(s) to be used
-    print(f"Set to use GPU: {id}")
+    print_title(f"Set to use GPU: {id}", char='#')
 
 
 def find_least_used_gpu():
@@ -396,22 +403,17 @@ def get_core_num():
 
 
 # region 获取内存大小
-def get_object_memory(obj, unit='gb'):
+def get_object_memory(obj, unit='gb', print_info=True):
     memory_size = sys.getsizeof(obj)
-    
-    if unit == 'bytes':
-        return memory_size
-    elif unit == 'kb':
-        return memory_size / 1024
-    elif unit == 'mb':
-        return memory_size / (1024 ** 2)
-    elif unit == 'gb':
-        return memory_size / (1024 ** 3)
-    else:
-        raise ValueError("Invalid unit. Please choose from 'bytes', 'kb', 'mb', or 'gb'.")
+    normalize_size = get_size_in_bytes(1, unit)
+    memory_size = memory_size / normalize_size
+
+    if print_info:
+        print(f"Estimated memory usage for object of type {type(obj).__name__}: {memory_size:.2f} {unit}")
+    return memory_size
 
 
-def estimate_array_memory(shape, data_type='float64', unit='gb'):
+def estimate_array_memory(shape, data_type='float64', unit='gb', print_info=True):
     '''
         可以利用arr.dtype来获取数组的data type
     '''
@@ -429,8 +431,55 @@ def estimate_array_memory(shape, data_type='float64', unit='gb'):
         memory_estimate = total_bytes / (1024 ** 3)
     else:
         raise ValueError("Invalid unit. Please choose from 'bytes', 'kb', 'mb', or 'gb'.")
-
+    if print_info:
+        print(f"Estimated memory usage for array with shape {shape} and data type {data_type}: {memory_estimate:.2f} {unit}")
     return memory_estimate
+
+
+def get_dict_memory(d, unit='gb', print_info=True):
+    """
+    计算字典中每个键的 Value 内存占用,忽略 Key 的内存
+    
+    :param d: 要分析的字典
+    :return: 字典,键为原字典的键,值为 Value 的内存占用
+    """
+    normalize_size = get_size_in_bytes(1, unit)
+    mem_info = {}
+    for key, value in d.items():
+        value_size = asizeof.asizeof(value)
+        mem_info[key] = value_size / normalize_size
+    
+    if print_info:
+        total_size = sum(mem_info.values())
+        print(f"Estimated memory usage for dictionary with {len(d)} items: {total_size:.2f} {unit}")
+    return mem_info
+
+
+def get_top_n_memory_item(d, top_n=5, unit='gb', print_info=True):
+    """
+    找出内存占用最大的前 top_n 个键值对(仅基于 Value 的内存)
+    
+    :param d: 要分析的字典
+    :param top_n: 返回前多少个最大元素
+    :return: 列表,包含前 top_n 个键值对的内存信息
+    """
+    mem_info = get_dict_memory(d, unit, print_info)
+    items = list(mem_info.items())
+    
+    # 按内存大小降序排序
+    sorted_items = sorted(items, key=lambda x: -x[1])
+    top_items = sorted_items[:top_n]
+    
+    # 构造返回结果
+    result = []
+    for key, size_value in top_items:
+        result.append({
+            'key': key,
+            'mem': size_value
+        })
+        if print_info:
+            print(f"Key: {key}, Memory Size: {size_value:.2f} {unit}")
+    return result
 # endregion
 
 
@@ -577,9 +626,41 @@ def rand_unit_vec(num, dim, rng=None):
 
 
 # region 时间相关函数
-def get_time(char='_'):
-    '''获取当前时间'''
-    return time.strftime(f'%Y{char}%m{char}%d{char}%H{char}%M{char}%S')
+def get_time(char='_', unit='us'):
+    """
+    获取当前时间，支持秒/毫秒/微秒级精度
+    
+    :param char: 时间各部分分隔符，默认为下划线
+    :param unit: 时间单位（'s'-秒, 'ms'-毫秒, 'us'-微秒），默认为'us'
+    :return: 格式化后的时间字符串
+    """
+    unit = unit.lower()
+    valid_units = {'s', 'ms', 'us'}
+    if unit not in valid_units:
+        raise ValueError(f"Invalid unit: {unit}. Must be one of {valid_units}")
+    
+    # 单位到精度的映射
+    unit_config = {
+        's':  ('', 0),
+        'ms': (f'{char}' + '%%03d', 3),  # 添加毫秒部分格式
+        'us': (f'{char}' + '%%06d', 6)   # 添加微秒部分格式
+    }
+    
+    now = datetime.datetime.now()
+    
+    # 基础时间格式
+    base_format = f'%Y{char}%m{char}%d{char}%H{char}%M{char}%S'
+    
+    # 拼接完整格式
+    suffix_format, precision = unit_config[unit]
+    full_format = base_format + suffix_format
+    
+    # 处理不同精度需求
+    if precision == 0:
+        return now.strftime(full_format)
+    else:
+        truncated = now.microsecond // (10 ** (6 - precision))
+        return now.strftime(full_format) % truncated
 
 
 def get_start_time():
@@ -592,11 +673,27 @@ def get_end_time():
     return time.perf_counter()
 
 
-def get_interval_time(start, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+def _readable_time(seconds):
+    if seconds < 60:
+        return f"{seconds:.9f} s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.2f} min"
+    elif seconds < 86400:
+        return f"{seconds / 3600:.2f} h"
+    else:
+        return f"{seconds / 86400:.2f} d"
+
+
+def get_interval_time(start, title='', print_info=True, **kwargs):
     '''获取时间间隔'''
     interval = time.perf_counter() - start
     if print_info:
-        print_title(f'{title} takes {round_float(interval, digits, format_type)} s')
+        if 'digits' in kwargs:
+            print('do not use digits, this will be deprecated soon')
+        if 'format_type' in kwargs:
+            print('do not use format_type, this will be deprecated soon')
+        # print_title(f'{title} takes {round_float(interval, digits, format_type)} s')
+        print(f'{title} takes {_readable_time(interval)}')
     return interval
 
 
@@ -610,11 +707,9 @@ def func_timer(func):
     '''
     @wraps(func)  # 使用wraps装饰内部函数
     def wrapper(*args, **kwargs):
-        start = time.perf_counter()
+        start = get_start_time()
         result = func(*args, **kwargs)
-        end = time.perf_counter()
-        interval = end - start
-        print_title(f'{func.__name__} takes {round_float(interval, ROUND_DIGITS, ROUND_FORMAT)} s')
+        interval = get_interval_time(start, title=func.__name__, print_info=True)
         return result
     return wrapper
 
@@ -623,11 +718,9 @@ class Timer:
     '''
     计时器类
     '''
-    def __init__(self, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
+    def __init__(self, title='', print_info=True):
         self.title = title
         self.print_info = print_info
-        self.digits = digits
-        self.format_type = format_type
         self.start_time = None
 
     def start(self):
@@ -639,7 +732,7 @@ class Timer:
         if self.start_time is None:
             print('Please start the timer first')
             return None
-        self.interval = get_interval_time(self.start_time, title=self.title, print_info=self.print_info, digits=self.digits, format_type=self.format_type)
+        self.interval = get_interval_time(self.start_time, title=self.title, print_info=self.print_info)
         return self.interval
 
     def stop(self):
@@ -651,12 +744,18 @@ class Timer:
 class WithTimer(Timer):
     '''
     利用with语句计时
+
+    例子:
+    with WithTimer('test') as with_timer:
+        print('hello world')
+    print(with_timer.interval)
     '''
-    def __init__(self, title='', print_info=True, digits=ROUND_DIGITS, format_type=ROUND_FORMAT):
-        super().__init__(title, print_info, digits, format_type)
+    def __init__(self, title='', print_info=True):
+        super().__init__(title, print_info)
 
     def __enter__(self):
         self.start()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end()
@@ -1013,6 +1112,7 @@ class Logger:
 
         # 获取python logging库的logger,注意,获得py_logger后,本类的所有方法才会记录到py_logger中
         self.py_logger = logging.getLogger(name)
+        self.py_logger.propagate = False
 
         # 配置日志格式
         formatter = logging.Formatter(format, datefmt=datefmt)
@@ -1203,6 +1303,38 @@ class CaptureManager:
 # endregion
 
 
+# region decorator
+def select_output(index):
+    """
+    装饰器工厂，允许指定要提取的返回值位置
+    
+    输入: index, 指定被装饰函数需要的返回值的索引
+    输出: 装饰器
+
+    例子:
+    直接装饰
+    @select_output(0)
+    def f(a, b):
+        return a, b
+
+    复合使用
+    select_output(index=1)(f)(a, b)
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            
+            # 如果是序列类型（如元组、列表）则按索引提取
+            if hasattr(result, "__getitem__"):
+                return result[index]
+            else:
+                raise ValueError("返回值不是可索引的序列类型")
+        return wrapper
+    return decorator
+# endregion
+
+
 # region class decorator
 def method_decorator(decorator):
     '''
@@ -1219,6 +1351,137 @@ def method_decorator(decorator):
                 setattr(cls, attr_name, decorator(attr_value))
         return cls
     return decorate
+# endregion
+
+
+# region class method recorder
+class MethodRecorder:
+    '''
+    使用例子:
+    class MyClass:
+        def __init__(self):
+            self.recorder = MethodRecorder(self)
+
+        def my_method(self):
+            print("This is my method")
+    my_instance = MyClass()
+    my_instance.my_method()  # 调用方法
+    print(my_instance.recorder.was_called('my_method'))  # 检查方法是否被调用过
+    '''
+    def __init__(self, target_instance, methods_to_record=None):
+        """
+        :param target_instance: 要记录的目标实例
+        :param methods_to_record: 要记录的方法名称列表,None 表示记录所有公共方法
+        """
+        self._call_records = {}
+        self._methods_to_record = methods_to_record
+        self._decorate_instance_methods(target_instance)
+    
+    def _decorate_instance_methods(self, instance):
+        cls = instance.__class__
+        for name, attr in inspect.getmembers(cls, inspect.isfunction):
+            # 跳过特殊方法和私有方法
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            
+            # 如果指定了要记录的方法列表,且当前方法不在列表中,则跳过
+            if self._methods_to_record and name not in self._methods_to_record:
+                continue
+            
+            # 创建方法装饰器
+            decorated = self._create_recorder_decorator(attr)
+            # 绑定装饰后的方法到实例
+            setattr(instance, name, types.MethodType(decorated, instance))
+    
+    def _create_recorder_decorator(self, method):
+        @wraps(method)
+        def recorder_wrapper(instance, *args, **kwargs):
+            # 调用实际方法前记录
+            self.record(method.__name__)
+            return method(instance, *args, **kwargs)
+        return recorder_wrapper
+    
+    def record(self, method_name):
+        self._call_records[method_name] = True
+    
+    def was_called(self, method_name):
+        return self._call_records.get(method_name, False)
+    
+    def reset(self, method_name=None):
+        if method_name:
+            if method_name in self._call_records:
+                del self._call_records[method_name]
+        else:
+            self._call_records.clear()
+
+    def __repr__(self):
+        called = [m for m in self._call_records.keys() if self._call_records[m]]
+        return f"<FlexibleMethodRecorder: Called={called}>"
+
+
+class CallOnceExecutor(MethodRecorder):
+    def __init__(self, target_instance, methods_to_protect=None, action="skip"):
+        """
+        :param target_instance: 要保护的目标实例
+        :param methods_to_protect: 需要保护的方法名称列表
+        :param action: 重复调用时的行为 - "skip"(跳过) 或 "block"(抛出异常)
+        """
+        super().__init__(target_instance, methods_to_protect)
+        self.action = action  # 重复调用时的行为
+    
+    def _create_recorder_decorator(self, method):
+        @wraps(method)
+        def executor_wrapper(instance, *args, **kwargs):
+            method_name = method.__name__
+            
+            # 检查方法是否已被调用过
+            if self.was_called(method_name):
+                # 根据设置的行为处理重复调用
+                if self.action == "skip":
+                    print(f"Warning: 跳过重复执行的 '{method_name}' 方法")
+                    return None  # 直接返回 None
+                elif self.action == "block":
+                    raise RuntimeError(f"方法 '{method_name}' 已被执行过,禁止二次执行")
+                else:
+                    # 默认行为 - 只是记录,不阻止执行
+                    print(f"Notice: 方法 '{method_name}' 重复执行")
+            
+            # 记录方法调用
+            self.record(method_name)
+            
+            # 执行原始方法
+            try:
+                return method(instance, *args, **kwargs)
+            except Exception as e:
+                # 如果执行失败,重置记录以便可以重试
+                self.reset(method_name)
+                raise e
+        
+        return executor_wrapper
+    
+    def can_execute(self, method_name):
+        """检查方法是否可以执行（未被调用过）"""
+        return not self.was_called(method_name)
+    
+    def get_action(self):
+        """获取当前设置的行为模式"""
+        return self.action
+    
+    def set_action(self, new_action):
+        """设置新的行为模式"""
+        valid_actions = ["skip", "block", "record_only"]
+        if new_action in valid_actions:
+            self.action = new_action
+        else:
+            raise ValueError(f"无效的行为: {new_action}. 可选值: {valid_actions}")
+    
+    def __repr__(self):
+        action_desc = {
+            "skip": "跳过重复执行",
+            "block": "阻止重复执行",
+            "record_only": "仅记录"
+        }
+        return f"<CallOnceExecutor: 模式={action_desc.get(self.action, '未知')}, {super().__repr__()}>"
 # endregion
 
 
@@ -1491,6 +1754,62 @@ def func_profiler(func):
         return result
     
     return wrapper
+
+
+def func_line_profiler(func):
+    '''
+    记录函数的每一行的执行时间
+    '''
+    # 创建 LineProfiler 实例，并包装目标函数
+    profiler = LineProfiler()
+    profiled_func = profiler(func)  # 将函数注册到分析器
+    
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # 执行被分析的函数
+            result = profiled_func(*args, **kwargs)
+        finally:
+            # 输出逐行分析结果（单位：微秒）
+            profiler.print_stats(output_unit=1e-6)
+        return result
+    return wrapper
+
+
+def func_memory_tracer(func):
+    '''
+    记录函数的内存使用情况
+    '''
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # 检查当前是否已启用跟踪
+        original_tracing = tracemalloc.is_tracing()
+        if not original_tracing:
+            tracemalloc.start()  # 若未启用，则启动跟踪
+        
+        # 拍摄执行前的内存快照
+        snapshot_before = tracemalloc.take_snapshot()
+        
+        # 执行被装饰的函数
+        result = func(*args, **kwargs)
+        
+        # 拍摄执行后的内存快照
+        snapshot_after = tracemalloc.take_snapshot()
+        
+        # 对比快照，按内存占用排序
+        top_stats = snapshot_after.compare_to(snapshot_before, 'lineno')
+        
+        # 打印内存分析结果
+        print(f"\nMemory usage analysis for {func.__name__}:")
+        for stat in top_stats[:5]:  # 显示前5个内存分配点
+            print(f"  {stat}")
+        
+        # 如果装饰器自己启用了跟踪，则停止
+        if not original_tracing:
+            tracemalloc.stop()
+        
+        return result
+    return wrapper
 # endregion
 
 
@@ -1545,7 +1864,17 @@ def current_file():
 
 def current_filename():
     '''获取当前文件名(不带后缀,不带路径)'''
-    return os.path.splitext(os.path.basename(current_file()))[0]
+    try:
+        caller_filename = current_file_ipynb()
+    except:
+        # 获取调用栈
+        stack = inspect.stack()
+        # 获取调用者的帧信息
+        caller_frame = stack[1]
+        # 获取调用者文件名
+        caller_filename = caller_frame.filename
+        # 打印文件名
+    return os.path.splitext(os.path.basename(caller_filename))[0]
 
 
 def current_dir():
@@ -1889,33 +2218,53 @@ def check_all_file_exist(*paths):
     return all(os.path.exists(path) for path in paths)
 
 
+def find_files_with_any_extension(path):
+    """
+    查找指定路径的所有匹配文件（包括原始路径和任意后缀版本）
+    
+    参数:
+        path (str): 文件路径
+        
+    返回:
+        list: 包含所有匹配文件的完整路径列表（可能为空）
+    """
+    result = []
+    
+    # 如果原始路径存在（文件或目录），加入结果
+    if os.path.exists(path):
+        result.append(path)
+    
+    # 分离目录和文件名
+    dir_path = os.path.dirname(path) or '.'  # 处理无目录的情况
+    file_name = os.path.basename(path)
+    
+    # 构建匹配模式（文件名.*）
+    pattern = os.path.join(dir_path, f"{file_name}.*")
+    
+    # 查找所有符合条件的普通文件（排除目录）
+    for p in glob.glob(pattern):
+        # 排除以点结尾的无效文件（如 "file."）
+        if os.path.isfile(p) and not p.endswith('.'):
+            # 避免重复添加原始路径（如果已存在）
+            if p != path:
+                result.append(p)
+    
+    return result
+
+
 def check_all_file_exist_with_any_extension(*paths):
     """
-    检查文件路径或该路径加任意后缀的文件是否存在
-    参数: *paths (str): 可变数量的文件路径
-    返回: bool: 当且仅当每个路径满足以下条件之一时返回True:
-        1. 路径本身存在（文件或目录）
-        2. 所在目录存在同名且带任意后缀的文件
+    检查多个文件路径或该路径加任意后缀的文件是否存在
+    
+    参数:
+        *paths (str): 可变数量的文件路径
+        
+    返回:
+        bool: 所有路径都至少有一个匹配文件时返回True
     """
     for path in paths:
-        # 先检查路径本身是否存在
-        if os.path.exists(path):
-            continue
-            
-        # 分离目录和文件名
-        dir_path = os.path.dirname(path) or '.'  # 处理无目录的情况
-        file_name = os.path.basename(path)
-        
-        # 构建匹配模式（文件名.*）
-        pattern = os.path.join(dir_path, f"{file_name}.*")
-        
-        # 查找符合条件的普通文件（排除目录）
-        found = any(
-            os.path.isfile(p) and not p.endswith('.')  # 排除以点结尾的无效文件
-            for p in glob.glob(pattern)
-        )
-        
-        if not found:
+        # 如果找不到任何匹配文件，立即返回False
+        if not find_files_with_any_extension(path):
             return False
     return True
 
@@ -1934,6 +2283,29 @@ def get_subdir(basedir, full=True):
         return [os.path.join(basedir, d) for d in os.listdir(basedir) if os.path.isdir(os.path.join(basedir, d))]
     else:
         return [d for d in os.listdir(basedir) if os.path.isdir(os.path.join(basedir, d))]
+
+
+def get_first_subdir(full_dir, part_dir):
+    '''
+    例子:
+    full_dir = '/home/user/documents/projects/some_project'
+    part_dir = '/home/user/documents'
+    get_first_subdir(full_dir, part_dir)  # 返回 'projects'
+    '''
+    full_abs = os.path.abspath(full_dir)
+    part_abs = os.path.abspath(part_dir)
+    try:
+        common_path = os.path.commonpath([full_abs, part_abs])
+    except ValueError:
+        return None
+    if common_path != part_abs:
+        return None
+    relative = os.path.relpath(full_abs, part_abs)
+    parts = relative.split(os.sep)
+    if not parts or parts[0] == '.':
+        return None
+    return parts[0]
+
 
 @not_recommend
 def get_common_subdir(basedir, subdir_names=None):
@@ -2024,7 +2396,7 @@ def enum_tutorial():
 # endregion
 
 
-# region 保存和加载相关函数
+# region 保存和加载,删除相关函数
 def save_code_copy(destination_folder, code_name):
     '''
     将code保存为一个带时间戳的副本(code_name需要带后缀)
@@ -2054,6 +2426,58 @@ def save_code_copy(destination_folder, code_name):
     shutil.copy(current_code_path, destination_path)
 
 
+def save_dict_yaml(data, file_path):
+    """
+    将字典保存为 YAML 文件
+
+    优势在于: 可以直接打开预览,修改
+    劣势在于: numpy array等不适合保存
+    """
+    with open(file_path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+
+
+def load_dict_yaml(file_path):
+    """
+    从 YAML 文件读取字典
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+
+def save_dict_txt(filename, dict_data, key_to_save=None):
+    """
+    将字典数据保存为结构化文本文件
+    
+    参数：
+    filename: 文件名(无需扩展名)
+    dict_data: 要保存的字典数据
+    key_to_save: 需要保存的键列表(默认保存全部键)
+    """
+    # 确定要保存的数据子集
+    data_to_save = dict_data if key_to_save is None else {k: dict_data[k] for k in key_to_save}
+    
+    # 处理后缀
+    if not filename.endswith('.txt'):
+        filename += '.txt'
+
+    # 创建文件夹
+    mkdir(os.path.dirname(filename))
+
+    # 保存数据到文本文件
+    with open(filename, 'w') as txt_file:
+        def write_dict(d, indent):
+            """递归写入字典的辅助函数"""
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    txt_file.write(' ' * indent + f'{key}:\n')
+                    write_dict(value, indent + 4)  # 增加缩进
+                else:
+                    txt_file.write(' ' * indent + f'{key}: {value}\n')
+        
+        write_dict(data_to_save, 0)  # 从0缩进开始写入
+
+
 def save_dict(dict_data, filename, format_list=None, key_to_save=None):
     '''保存字典到txt和pkl文件'''
     if format_list is None:
@@ -2074,27 +2498,42 @@ def save_dict(dict_data, filename, format_list=None, key_to_save=None):
 
     # 保存到txt
     if 'txt' in format_list:
-        with open(filename + '.txt', 'w') as txt_file:
-            def write_dict(d, indent):
-                for key, value in d.items():
-                    if isinstance(value, dict):
-                        txt_file.write(' ' * indent + f'{key}:\n')
-                        write_dict(value, indent + 4)  # 增加缩进
-                    else:
-                        txt_file.write(' ' * indent + f'{key}: {value}\n')
-            indent = 0
-            write_dict({k: dict_data[k] for k in key_to_save}, indent)
+        save_dict_txt(filename, dict_data, key_to_save=key_to_save)
 
     # 保存到pkl
     if 'pkl' in format_list:
         save_pkl({k: dict_data[k] for k in key_to_save}, filename)
 
 
+def save_dict_merge_to_saved(dict_data, filename, format_list=None, key_to_save=None, overwrite_separate=True):
+    '''
+    将dict_data保存到filename中,如果filename已经存在,则将dict_data与已存在的字典合并
+    '''
+    if key_to_save is None:
+        key_to_save = list(dict_data.keys())
+
+    try:
+        # 尝试加载已存在的字典
+        previous_dict = load_dict(filename)
+    except:
+        previous_dict = {}
+
+    if overwrite_separate is False:
+        for k in key_to_save:
+            if k in previous_dict:
+                raise ValueError(f"Key '{k}' already exists in the saved dictionary. Use overwrite_separate=True to overwrite.")
+            
+    # 合并字典
+    dict_data_to_save = {k: dict_data[k] for k in key_to_save}
+    merged_dict = {**previous_dict, **dict_data_to_save}
+    save_dict(merged_dict, filename, format_list=format_list, key_to_save=key_to_save)
+
+
 def get_load_function(format):
     '''
     根据格式获取合适的读取函数
     '''
-    d = {'npy': load_array, 'npz': load_sps_array, 'pkl': load_pkl, 'joblib': load_pkl, 'pickle': load_pkl}
+    d = {'npy': load_array, 'npz': load_sps_array, 'pkl': load_pkl, 'joblib': load_pkl, 'pickle': load_pkl, '': load_dict_separate}
     return d[format]
 
 
@@ -2124,35 +2563,44 @@ def save_key_value_pair(key, value, save_func_dict, save_kwargs_dict, save_dir, 
         return None, None
 
 
-def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, overwrite=False, save_txt=True, process_num=1, key_to_save=None):
+def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, overwrite=False, save_as_txt=True, process_num=1, key_to_save=None, max_depth=0, current_depth=0, remove_after_save=False):
     """
-    保存包含非字符串键的字典，将每个值保存为单独的文件，并保存键的映射关系。
+    保存包含非字符串键的字典,将每个值保存为单独的文件,并保存键的映射关系
+
+    支持嵌套使用(即字典的值为字典时,也会separate保存),但是不支持无限递归
 
     参数：
-    dict_data (dict): 要保存的字典，字典的键可以是任何可哈希的类型
+    dict_data (dict): 要保存的字典,字典的键可以是任何可哈希的类型
     save_dir (str): 保存文件的目标目录
     save_func_dict (dict): 指定每个键的保存函数,None则自动选择
     save_kwargs_dict (dict): 指定每个键的保存函数的参数,None则不输入参数
     overwrite (bool): 是否覆盖整个已存在的目标目录,默认为 False
-    save_txt (bool): 是否保存为txt文件,默认为 True(txt保存的是整个字典,方便预览)
+    save_as_txt (bool): 是否保存为txt文件,默认为 True(txt保存的是整个字典,方便预览)
     process_num (int): 并行处理的进程数,默认为 1
     key_to_save (list): 指定要保存的键的列表,默认为 None,保存所有键
+    max_depth (int, optional): 最大递归深度,默认为 0,表示不嵌套;不允许无限递归
+    current_depth (int): 内部使用的当前递归深度,用户无需设置
+    remove_after_save (bool): 是否删除已经保存的键值对
     """
+    # 假设dict_data为空字典,则不保存
+    if len(dict_data) == 0:
+        print_title("Warning: The dictionary is empty. No files will be saved.", char='*')
+        return
+    
     if key_to_save is None:
         key_to_save = list(dict_data.keys())
 
-    if save_func_dict is None:
-        save_func_dict = create_dict(key_to_save, None)
+    save_func_dict = fill_missing_key(save_func_dict, key_to_save, None)
+    save_kwargs_dict = fill_missing_key(save_kwargs_dict, key_to_save, {})
 
-    for k, v in save_func_dict.items():
-        if v is None:
-            save_func_dict[k] = get_save_function_for_object(dict_data[k])
-    
-    if save_kwargs_dict is None:
-        save_kwargs_dict = create_dict(key_to_save, None)
-    for k, v in save_kwargs_dict.items():
-        if v is None:
-            save_kwargs_dict[k] = {}
+    for k in key_to_save:
+        if save_func_dict.get(k, None) is not None:
+            continue  # 用户已指定保存函数，跳过
+        value = dict_data[k]
+        if isinstance(value, dict) and current_depth < max_depth:
+            save_func_dict[k] = partial(save_dict_separate, save_as_txt=save_as_txt, max_depth=max_depth, current_depth=current_depth + 1)
+        else:
+            save_func_dict[k] = get_save_function_for_object(value)
     
     if overwrite and os.path.exists(save_dir):
         shutil.rmtree(save_dir)
@@ -2168,37 +2616,71 @@ def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dic
     save_dict(metadata, os.path.join(save_dir, 'metadata'))
 
     # 保存原始字典的预览
-    if save_txt:
-        for k, v in dict_data.items():
+    if save_as_txt:
+        for k, v in metadata.items():
             if k in key_to_save:
-                save_dict({k: v}, os.path.join(save_dir, 'preview', metadata[k]), format_list=['txt'])
+                save_txt(dict_data[k], os.path.join(save_dir, 'preview', v))
+    
+    # 如果remove_after_save为True,则删除已经保存的键值对
+    if remove_after_save:
+        for k in key_to_save:
+            del dict_data[k]
 
 
-def save_dict_separate_merge_to_saved(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, save_txt=True, process_num=1, key_to_save=None):
+def save_dict_separate_merge_to_saved(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, overwrite_separate=True, save_as_txt=True, process_num=1, key_to_save=None, max_depth=0, current_depth=0, remove_after_save=False):
     '''
     save_dict_separate,但是将保存的文件合并到已经存在的separate saved dict中,更新metadata
 
     注意:
-    不允许overwrite
-    不允许原先dict和新dict中有相同的键
+    不允许save_dict_separate中的overwrite(会导致原先保存的dict被覆盖)
+    可设置overwrite_separate,仅覆盖相同的键
+    当overwrite_separate为False时,不允许原先dict和新dict中要key_to_save的键相同
     '''
-    # 读取已存在的metadata
-    exist_metadata = load_pkl(os.path.join(save_dir, 'metadata'))
-
-    # 检查是否存在相同的键
-    for k in dict_data.keys():
-        if k in exist_metadata.values():
-            raise ValueError(f"Key '{k}' already exists in the existing metadata. Please use a different key.")
-
-    # 保存
-    save_dict_separate(dict_data, save_dir, save_func_dict=save_func_dict, save_kwargs_dict=save_kwargs_dict, overwrite=False, save_txt=save_txt, process_num=process_num, key_to_save=key_to_save)
-
-    # 更新metadata
-    new_metadata = load_pkl(os.path.join(save_dir, 'metadata')) # 读取新保存的metadata
-    metadata = update_dict(exist_metadata, new_metadata) # 合并metadata
+    def _save():
+        # 保存
+        save_dict_separate(dict_data, save_dir, save_func_dict=save_func_dict, save_kwargs_dict=save_kwargs_dict, overwrite=False, save_as_txt=save_as_txt, process_num=process_num, key_to_save=key_to_save, max_depth=max_depth, current_depth=current_depth, remove_after_save=remove_after_save)
     
-    # 保存更新后的metadata和preview
-    save_dict(metadata, os.path.join(save_dir, 'metadata'))
+    # 如果metadata存在,则读取后更新metadata
+    if check_all_file_exist_with_any_extension(os.path.join(save_dir, 'metadata')):
+        # 读取已存在的metadata
+        exist_metadata = load_pkl(os.path.join(save_dir, 'metadata'))
+
+        # 检查是否存在相同的键
+        if overwrite_separate is False:
+            for k in key_to_save:
+                if k in exist_metadata.values():
+                    raise ValueError(f"Key '{k}' in key_to_save already exists in the existing metadata. This is not allowed when overwrite_separate is False.")
+    
+        # 保存(注意,这个和else是重复的,但是不能直接写到if else外面,否则只会保存新的metadata,旧的metadata会被覆盖)
+        _save()
+
+        # 更新metadata
+        new_metadata = load_pkl(os.path.join(save_dir, 'metadata')) # 读取新保存的metadata
+        metadata = update_dict(exist_metadata, new_metadata) # 合并metadata
+        
+        # 保存更新后的metadata
+        save_dict(metadata, os.path.join(save_dir, 'metadata'))
+    else:
+        # 保存
+        _save()
+
+
+def delete_saved_dict_separate(save_dir, key_to_delete=None):
+    if key_to_delete is None:
+        rmdir(save_dir)
+    else:
+        metadata = load_pkl(os.path.join(save_dir, 'metadata'))
+        for k in key_to_delete:
+            if k in metadata:
+                # 找到对应的文件
+                file_list = find_files_with_any_extension(os.path.join(save_dir, metadata[k]))
+                # 只有仅找到一个文件时才删除
+                if len(file_list) == 1:
+                    delete_file(file_list[0])  # 删除文件
+                    del metadata[k]  # 删除metadata中的键
+                elif len(file_list) > 1:
+                    print(f"Warning: Multiple files found for key '{k}'. Not deleting any files to avoid confusion.")
+        save_dict(metadata, os.path.join(save_dir, 'metadata'))  # 保存更新后的metadata
 
 
 def check_saved_dict_completeness(save_dir):
@@ -2239,7 +2721,25 @@ def part_load_dict_separate(load_dir, subfile, metadata, key_to_load):
     return None, None
 
 
-def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode='include', filter_logic='or', filter_func=None, process_num=1):
+def _compatible_data_container(obj):
+    '''
+    定义一个修饰器,使读取函数兼容DataContainer
+    '''
+    @wraps(obj)
+    def wrapper(*args, **kwargs):
+        r = obj(*args, **kwargs)
+        if isinstance(r, DataContainer):
+            # 如果读取的对象是DataContainer,则不需要转换(当直接读pickle文件时会保持DataContainer)
+            pass
+        elif isinstance(r, dict):
+            # 如果读取的对象是字典,则需要转换为DataContainer(当分开读取的时候会先读成字典)
+            if '_config' in r:
+                r = _dict_to_data_container(r)
+        return r
+    return wrapper
+
+@_compatible_data_container
+def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode='include', filter_logic='or', filter_func=None, process_num=1, ensure_config=True):
     """
     从指定目录中加载字典，并还原原始的键和值类型。
 
@@ -2250,7 +2750,9 @@ def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode=
     filter_mode (str): 指定过滤模式,默认为 'include',可选 'include' 或 'exclude';'include'表示只加载包含指定字符串的键,'exclude'表示不加载包含指定字符串的键
     filter_logic (str): 指定过滤逻辑,默认为 'or',可选 'or' 或 'and';'or'表示只要有一个字符串匹配即可,'and'表示所有字符串都要匹配
     filter_func (function): 指定过滤函数,默认为 None,不过滤(过滤函数输出True则保留,False则删除)(当需要的逻辑无法通过字符串实现时,可以使用函数)
-
+    process_num (int): 并行处理的进程数,默认为 1
+    ensure_config (bool): 是否确保'_config'在key_to_load中,默认为 True,如果'_config'不在key_to_load中,则添加'_config'到key_to_load中
+    
     返回:
     dict: 恢复的原始字典
 
@@ -2283,6 +2785,11 @@ def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode=
     # 根据函数过滤键
     if filter_func is not None:
         key_to_load = [k for k in key_to_load if filter_func(k)]
+    
+    if ensure_config:
+        # 确保'_config'在key_to_load中
+        if '_config' in metadata.keys() and '_config' not in key_to_load:
+            key_to_load.append('_config')
 
     loaded_data = {}
 
@@ -2296,16 +2803,43 @@ def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode=
     return loaded_data
 
 
-def load_dict_auto(filename, key_to_load=None, filter_str=None, filter_mode='include', filter_logic='or', filter_func=None, process_num=1):
+def load_dict_separate_merge_to_exist(exist_dict, load_dir, key_to_load=None, filter_str=None, filter_mode='include', filter_logic='or', filter_func=None, process_num=1, ensure_config=True):
+    '''
+    从指定目录中加载字典,并且与已存在的字典合并
+
+    注意,exist_dict必须和loaded_dict拥有相同的结构,比如同时为dict或者同时为DataContainer
+
+    在OrderedDataContainer中,'_config'里面有'param_map'
+    由于这种嵌套性,_config不能直接像其他的key,value那样直接使用update
+
+    例子:
+    loaded_data = {'_config': {'param_map': {'a': '1'}}, ...}
+    exist_dict['_config']['param_map'] = {'b': '2'}
+
+    直接update
+    exist_dict.update(config) # exist_dict['_config']['param_map'] = {'a': '1'}
+
+    使用此函数, exist_dict['_config']['param_map'] = {'a': '1', 'b': '2'}
+    '''
+    loaded_data = load_dict_separate(load_dir, key_to_load=key_to_load, filter_str=filter_str, filter_mode=filter_mode, filter_logic=filter_logic, filter_func=filter_func, process_num=process_num, ensure_config=ensure_config)
+    if '_config' in loaded_data.keys():
+        config = loaded_data.pop('_config')
+        exist_dict['_config']['param_map'].update(config['param_map'])
+    exist_dict.update(loaded_data)
+    return exist_dict
+
+
+@_compatible_data_container
+def load_dict_auto(filename, key_to_load=None, filter_str=None, filter_mode='include', filter_logic='or', filter_func=None, process_num=1, ensure_config=True):
     '''
     自动选择普通模式或者separate模式加载字典
     '''
-    if os.path.isdir(os.path.join(filename)):
-        return load_dict_separate(filename, key_to_load=key_to_load, filter_str=filter_str, filter_mode=filter_mode, filter_logic=filter_logic, filter_func=filter_func, process_num=process_num)
-    else:
+    try:
+        return load_dict_separate(filename, key_to_load=key_to_load, filter_str=filter_str, filter_mode=filter_mode, filter_logic=filter_logic, filter_func=filter_func, process_num=process_num, ensure_config=ensure_config)
+    except:
         return load_pkl(os.path.join(filename))
 
-
+@_compatible_data_container
 def load_dict(*args, **kwargs):
     '''
     load_dict_auto的缩写
@@ -2745,7 +3279,7 @@ def load_array(filename):
         filename += '.npy'
     
     # 加载数组
-    return np.load(filename)
+    return np.load(filename, allow_pickle=True)
 
 
 def load_sps_array(filename):
@@ -2768,6 +3302,39 @@ def load_sps_array(filename):
     return sps.load_npz(filename)
 
 
+def save_txt(data, filename):
+    '''
+    将数据保存到txt文件中
+    '''
+    # 创建文件夹
+    mkdir(os.path.dirname(filename))
+
+    # 添加后缀
+    if not filename.endswith('.txt'):
+        filename += '.txt'
+
+    # 保存数据
+    with open(filename, 'w') as f:
+        f.write(str(data))
+
+
+def save_list_txt(data, filename):
+    '''
+    将列表数据保存到txt文件中
+    '''
+    # 创建文件夹
+    mkdir(os.path.dirname(filename))
+
+    # 添加后缀
+    if not filename.endswith('.txt'):
+        filename += '.txt'
+
+    # 保存数据
+    with open(filename, 'w') as f:
+        for item in data:
+            f.write(str(item) + '\n')
+
+
 def load_txt(filename):
     '''
     从txt文件中加载数据
@@ -2780,6 +3347,184 @@ def load_txt(filename):
     with open(filename, 'r') as f:
         lines = f.readlines()
         return [line.strip() for line in lines]
+
+
+# region lmdb
+def get_size_in_bytes(size, unit):
+    '''
+    统一转换为bytes
+    '''
+    units = {'bytes':1, 'kb':1024, 'mb':1024**2, 'gb':1024**3, 'tb':1024**4}
+    return int(size * units[unit.lower()])
+
+
+def init_lmdb(filename, size=1, unit='gb'):
+    """初始化 LMDB 环境，自动根据现有数据库调整大小"""
+
+    initial_map_size = get_size_in_bytes(size, unit)
+    
+    if os.path.exists(filename):
+        try:
+            # 尝试打开现有环境获取实际 map_size
+            existing_env = lmdb.open(filename, readonly=True, lock=False)
+            existing_map_size = existing_env.info()['map_size']
+            existing_env.close()
+            initial_map_size = max(initial_map_size, existing_map_size)
+        except lmdb.Error:
+            # 处理无法打开的情况（如文件损坏）
+            pass
+    
+    return lmdb.open(filename, 
+                    map_size=initial_map_size,
+                    subdir=True,
+                    create=True,
+                    readahead=True)
+
+
+def _auto_expand(env, size, unit='gb', max_size=100, max_size_unit='gb'):
+    """
+    智能扩容机制,按几何倍增长
+    """
+    size_in_bytes = get_size_in_bytes(size, unit)
+    max_size_in_bytes = get_size_in_bytes(max_size, max_size_unit)
+    new_size_in_bytes = max(env.info()['map_size'], size_in_bytes) * 1.5
+    new_size_in_unit = new_size_in_bytes / get_size_in_bytes(1, unit)
+    if new_size_in_bytes > max_size_in_bytes:
+        raise MemoryError(f'Need {new_size_in_unit:.2f}{unit} but max_size={max_size:.2f}{max_size_unit}, please set a larger size')
+    env.set_mapsize(new_size_in_bytes)
+    print(f"Auto-expanded to: {new_size_in_unit:.2f}{unit}")
+    return new_size_in_unit
+
+
+def _key_to_bytes(key):
+    buffer = BytesIO()
+    joblib.dump(key, buffer)
+    return buffer.getvalue()
+
+
+def _bytes_to_key(byte_key):
+    buffer = BytesIO(byte_key)
+    return joblib.load(buffer)
+
+
+def save_dict_lmdb(data, filename, key_to_save=None, size=1, unit='gb', overwrite=True, max_size=100, max_size_unit='gb', remove_after_save=False):
+    """根据 overwrite 决定是否覆盖"""
+    if key_to_save is None:
+        key_to_save = list(data.keys())
+    
+    mkdir(os.path.dirname(filename))
+
+    with init_lmdb(filename, size=size, unit=unit) as env:
+        while size < max_size:
+            try:
+                with env.begin(write=True) as txn:
+                    for key in key_to_save:
+                        byte_key = _key_to_bytes(key)
+                        buffer = BytesIO()
+                        joblib.dump(data[key], buffer)
+                        value = buffer.getvalue()
+                        if overwrite or txn.get(byte_key) is None:
+                            txn.put(byte_key, value)
+
+                    # 保存所有key
+                    all_keys = _get_all_keys_lmdb(txn)
+                    save_list_txt(all_keys, os.path.join(filename, 'all_keys'))
+                    save_joblib(all_keys, os.path.join(filename, 'all_keys'))
+    
+                    if remove_after_save:
+                        for key in key_to_save:
+                            del data[key]
+                    return  # 成功保存后退出
+            except lmdb.MapFullError:
+                size = _auto_expand(env, size=size, unit=unit, max_size=max_size, max_size_unit=max_size_unit)
+        raise lmdb.MapFullError(f"Auto expand to {size} {unit}, but exceed max_size={max_size} {max_size_unit}, please set a larger size")
+
+
+def delete_saved_dict_lmdb(filename, key_to_delete=None):
+    '''
+    如果是OrderedDataContainer,删除key不会同步删去_param_map中的对应key,如果真的需要删除_param_map中的key,请手动删除
+    '''
+    if key_to_delete is None:
+        rmdir(filename)
+    else:
+        all_keys = get_all_keys_lmdb_custom(filename)
+        with init_lmdb(filename) as env:
+            with env.begin(write=True) as txn:
+                for key in key_to_delete:
+                    byte_key = _key_to_bytes(key)
+                    if key in all_keys:
+                        txn.delete(byte_key)
+                        all_keys.remove(key)
+        save_list_txt(all_keys, os.path.join(filename, 'all_keys'))
+        save_joblib(all_keys, os.path.join(filename, 'all_keys'))
+
+
+@_compatible_data_container
+def load_dict_lmdb(filename, key_to_load=None, ensure_config=True):
+    """
+    从数据库加载数据
+    
+    为了性能上的考虑,只有在必要的时候才会得到all_keys,因为对于一个key相当多的lmdb,get_all_keys_lmdb_custom是比较耗费时间的
+    """
+    all_keys = None
+
+    if key_to_load is None:
+        all_keys = get_all_keys_lmdb_custom(filename)
+        key_to_load = all_keys.copy()
+
+    if ensure_config:
+        if all_keys is None:
+            all_keys = get_all_keys_lmdb_custom(filename)
+        # 确保'_config'在key_to_load中
+        if '_config' in all_keys and '_config' not in key_to_load:
+            key_to_load.append('_config')
+    
+    with init_lmdb(filename) as env:
+        with env.begin() as txn:
+            try:
+                return {
+                    key: joblib.load(BytesIO(txn.get(_key_to_bytes(key))))
+                    for key in key_to_load
+                }
+            except Exception as e:
+                if all_keys is None:
+                    all_keys = get_all_keys_lmdb_custom(filename)
+                if is_sublist(key_to_load, all_keys):
+                    raise ValueError(e)
+                else:
+                    raise KeyError(f"key_to_load {key_to_load} is not a sub list of {all_keys}")
+
+
+def load_dict_lmdb_merge_to_exist(exist_dict, filename, key_to_load=None, ensure_config=True):
+    '''
+    见load_dict_separate_merge_to_exist
+    '''
+    loaded_data = load_dict_lmdb(filename, key_to_load=key_to_load, ensure_config=ensure_config)
+    if '_config' in loaded_data.keys():
+        config = loaded_data.pop('_config')
+        exist_dict['_config']['param_map'].update(config['param_map'])
+    exist_dict.update(loaded_data)
+    return exist_dict
+
+
+def _get_all_keys_lmdb(txn):
+    return [_bytes_to_key(byte_key) for byte_key, _ in txn.cursor()]
+
+
+def get_all_keys_lmdb(filename):
+    """获取数据库所有键列表,较慢"""
+    with init_lmdb(filename) as env:
+        with env.begin() as txn:
+            return _get_all_keys_lmdb(txn)
+
+
+def get_all_keys_lmdb_custom(filename):
+    '''
+    从我保存的all_keys文件中获取所有键,极快
+    '''
+    all_keys = load_joblib(os.path.join(filename, 'all_keys'))
+    return all_keys
+# endregion
 # endregion
 
 
@@ -2980,17 +3725,37 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name
     多进程并行处理函数
 
     参数:
-    - process_num: int, 并行处理的进程数(由于multi_process状态下,代码错误的提示难以看出错误位置,在测试时可以先把process_num设置为1,这时会按照正常默认方式运行和报错)
-    - func: function, 要并行处理的函数
-    - args_list: list, 函数的位置参数列表
-    - kwargs_list: list, 函数的关键字参数列表
-    - func_name: str, 函数的名称(也可以输入任务的名称等需要显示的信息)
+    - process_num: int,并行处理的进程数(由于multi_process状态下,代码错误的提示难以看出错误位置,在测试时可以先把process_num设置为1,这时会按照正常默认方式运行和报错)
+    - func: function,要并行处理的函数
+    - args_list: list,函数的位置参数列表
+    - kwargs_list: list,函数的关键字参数列表
+    - func_name: str,函数的名称(也可以输入任务的名称等需要显示的信息)
 
     注意:
     假如args_list = [(1), (2)]这样的写法是不对的,至少要让里面成为元组,即args_list = [(1,), (2,)]
     假如已经在multi_process中,继续使用multi_process会自动转为单进程运行(此时args_list和kwargs_list会被flatten)
+    
+    假如输入的args_list和kwargs_list都不包含多个元素,最终会被广播到process_num的数量
+    否则,process_num只代表分割的数量,而不是重复的数量
+
+    multi_process下要尽量避免使用全局随机和输入同一个rng,如果函数一样,多个process会有一样的结果,推荐的使用的方式是输入不同的seed在内部产生rng
     '''
-    func_list = [func] * process_num
+    def _get_input_l_len(l):
+        if l is None:
+            return 0
+        elif isinstance(l, list):
+            return len(l)
+        else:
+            raise ValueError("args_list and kwargs_list must be list or None")
+    
+    max_len = max(_get_input_l_len(args_list), _get_input_l_len(kwargs_list))
+
+    if max_len <= 1:
+        if process_num > 1:
+            print_title(f'input function, args_list and kwargs_list are all not multiple, use {process_num} processes to repeat the function')
+        func_list = [func] * process_num
+    else:
+        func_list = [func] * max_len
     return multi_process_for_different_func(process_num, func_list, args_list, kwargs_list, func_name)
 
 
@@ -3174,6 +3939,24 @@ def get_max_decimal_num(number_list, **kwargs):
 
 
 # region 字符串,filename处理相关函数
+def camel_to_snake(name):
+    """
+    将驼峰命名法字符串转换为下划线命名法
+    示例:
+        camelCase -> camel_case
+        CamelCase -> camel_case
+        HTTPRequest -> http_request
+        SimpleXMLParser -> simple_xml_parser
+        version2Update -> version2_update
+    """
+    # 处理连续大写字母的情况（如HTTP）
+    s1 = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
+    # 处理单个大写字母（或数字后的大写字母）的情况
+    s2 = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s1)
+    # 转换为全小写
+    return s2.lower()
+
+
 def format_text(text, text_process=None):
     '''
     格式化文本(主要是为了画图美观)
@@ -3414,27 +4197,33 @@ def format_filename(filename, file_process=None):
         return filename.replace(' ', file_process['replace_blank'])
 
 
-def concat_str(strs, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True):
-    '''连接字符串列表,并使用指定的分隔符连接
+def concat_str(strs, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True, convert_non_str=True):
+    '''
+    连接字符串列表,并使用指定的分隔符连接
     
     Parameters:
     - strs: 要连接的字符串列表
-    - sep: 用作分隔符的字符串，默认为'_'
-    - rm_double_sep: 是否移除重复的分隔符，默认为True
-    - ignore_none: 是否忽略None值，默认为True
-    - ignore_empty: 是否忽略空字符串，默认为True
+    - sep: 用作分隔符的字符串,默认为'_'
+    - rm_double_sep: 是否移除重复的分隔符,默认为True
+    - ignore_none: 是否忽略None值,默认为True
+    - ignore_empty: 是否忽略空字符串,默认为True
+    - convert_non_str: 是否将非字符串类型转换为字符串,默认为True
     
     Returns:
     - 连接后的字符串
     '''
-    # 如果 ignore_none 为 True，过滤掉 None 值
+    # 如果 ignore_none 为 True,过滤掉 None 值
     if ignore_none:
         strs = [s for s in strs if s is not None]
     
-    # 如果 ignore_empty 为 True，过滤掉空字符串
+    # 如果 ignore_empty 为 True,过滤掉空字符串
     if ignore_empty:
         strs = [s for s in strs if s != '']
     
+    # 如果 convert_non_str 为 True,将非字符串类型转换为字符串
+    if convert_non_str:
+        strs = [str(s) for s in strs]
+
     # 连接字符串
     result = sep.join(strs)
     
@@ -3446,11 +4235,11 @@ def concat_str(strs, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty
     return result
 
 
-def cat(*args, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True):
+def cat(*args, sep='_', rm_double_sep=True, ignore_none=True, ignore_empty=True, convert_non_str=True):
     '''
     连接字符串列表,并使用指定的分隔符连接(简化版)
     '''
-    return concat_str(strs=args, sep=sep, rm_double_sep=rm_double_sep, ignore_none=ignore_none, ignore_empty=ignore_empty)
+    return concat_str(strs=args, sep=sep, rm_double_sep=rm_double_sep, ignore_none=ignore_none, ignore_empty=ignore_empty, convert_non_str=convert_non_str)
 
 
 def hash_or_str(key, sep='_', replace_dot=REPLACE_DOT):
@@ -3502,10 +4291,32 @@ def get_dict(**kwargs):
     return kwargs
 
 
-def update_dict_kwargs(dic, **kwargs):
+def update_dict_kwargs(d, **kwargs):
     '''根据kwargs更新字典'''
-    dic.update(kwargs)
-    return dic
+    d.update(kwargs)
+    return d
+
+
+def fill_missing_key(d, key_list, fill_value=None):
+    '''
+    处理d
+    如果d为None,则返回一个key_list的字典,值为fill_value
+    如果d是字典,如果d缺少了key_list中的key,则将key, fill_value添加到d中
+    '''
+    if d is None:
+        return {k: fill_value for k in key_list}
+    new_d = d.copy()
+    for k in key_list:
+        if k not in new_d:
+            new_d[k] = fill_value
+    return new_d
+
+
+def fill_dict_kwargs(d, key_list):
+    '''
+    处理复杂的kwargs输入
+    '''
+    return fill_missing_key(d, key_list, fill_value={})
 
 
 @not_recommend
@@ -3595,36 +4406,258 @@ def adjust_dict_key(d, key_map):
         new_key = key_map(k)
         new_dict[new_key] = v
     return new_dict
+
+
+def is_subdict(sub_dict, main_dict):
+    '''
+    判断一个字典是否是另一个字典的子集
+    '''
+    for key, value in sub_dict.items():
+        if key not in main_dict or main_dict[key] != value:
+            return False
+    return True
+
+
+def all_elements_in_dict_keys(l, d):
+    """检查列表所有元素是否都是字典的键"""
+    return all(element in d for element in l)
 # endregion
 
 
 # region data container
+class BuildKeyStrategy(abc.ABC):
+    """生成键的通用策略基类"""
+    def __init__(self, included_name_list=None):
+        if included_name_list is None:
+            included_name_list = []
+        self.included_name_list = included_name_list
+
+    def validate_params(self, kwargs, allowed_params=None):
+        if not kwargs:
+            raise ValueError("至少需要提供一个有效参数")
+        
+        if allowed_params is not None:
+            invalid = [p for p in kwargs if p not in allowed_params]
+            if invalid:
+                raise ValueError(f"无效参数: {invalid},允许的参数为: {allowed_params}")
+
+    def _append_to_parts(self, parts, name, value):
+        if name in self.included_name_list:
+            parts.append(name)
+        parts.append(value)
+
+    @abc.abstractmethod
+    def build_key(self, **kwargs):
+        pass
+
+    def __call__(self, **kwargs):
+        """直接调用时触发build_key"""
+        return self.build_key(**kwargs)
+
+
+class SortedBuildKey(BuildKeyStrategy):
+    """按参数名首字母顺序生成键"""
+    def build_key(self, **kwargs):
+        self.validate_params(kwargs)
+        sorted_params = sorted(kwargs.keys())
+        parts = []
+        for name in sorted_params:
+            value = kwargs[name]
+            self._append_to_parts(parts, name, value)
+        return cat(*parts)
+
+
+class OrderedBuildKey(BuildKeyStrategy):
+    """按预定义顺序生成键"""
+    def __init__(self, param_order, included_name_list=None):
+        self.param_order = param_order
+        super().__init__(included_name_list=included_name_list)
+
+    def build_key(self, **kwargs):
+        self.validate_params(kwargs, self.param_order)
+        parts = []
+        for param in self.param_order:
+            if param in kwargs:
+                value = kwargs[param]
+                self._append_to_parts(parts, param, value)
+        return cat(*parts)
+
+
 class DataContainer(dict):
     """
     数据容器,内部是字典,但是可以使用kwargs访问value
     自动按参数名首字母顺序生成键的数据容器,无需指定param_order
     """
-    def __init__(self):
+    def __init__(self, included_name_list=None):
         super().__init__()
-        self['_params_map'] = {}
-    
-    def _build_key(self, **kwargs):
-        """按参数名首字母顺序生成下划线连接的键"""
-        sorted_params = sorted(kwargs.keys())  # 参数名按字母顺序排序
-        parts = [str(kwargs[param]) for param in sorted_params]
-        if not parts:
-            raise ValueError("至少需要提供一个有效参数")
-        return cat(*parts)
+        self.key_builder = SortedBuildKey(included_name_list=included_name_list)
+        self['_config'] = {}
+        self['_config']['included_name_list'] = self.key_builder.included_name_list
+        self['_config']['param_map'] = {}
+        self.ignore_key_list = ['_config']
+
+    def build_key(self, **kwargs):
+        return self.key_builder.build_key(**kwargs)
+
+    def decompose_key(self, key):
+        '''
+        将键分解为参数名和参数值
+        '''
+        return self['_config']['param_map'][key]
 
     def set_value(self, value, **kwargs):
-        key = self._build_key(**kwargs)
-        self[key] = value
-        self['_params_map'][key] = kwargs.copy()  # 保存参数信息
+        key = self.build_key(**kwargs)
+        self[key] = value  # 这里没有copy,因为value可能要在内部和外部同时变动
+        self['_config']['param_map'][key] = kwargs.copy()  # 保存参数信息
     
     def get_value(self, **kwargs):
-        key = self._build_key(**kwargs)
-        return self.get(key, None)
-    
+        key = self.build_key(**kwargs)
+        if key in self:
+            return self[key]
+        else:
+            raise KeyError(f"Key '{key}' not found in DataContainer")
+
+    def get_partial_match_key_list(self, **kwargs):
+        '''
+        获得包含指定参数的所有键
+        '''
+        key_list = []
+        for k, params in self['_config']['param_map'].items():
+            if is_subdict(kwargs, params):
+                key_list.append(k)
+        return key_list
+
+    def _set_subcontainer(self, subcontainer, remove_matched_params=True, **kwargs):
+        '''
+        根据参数条件设置子数据容器
+        '''
+        for key in self:
+            if key in self.ignore_key_list:
+                continue
+            params = self['_config']['param_map'][key]
+            if is_subdict(kwargs, params):
+                if remove_matched_params:
+                    # 获取params除去kwargs的部分
+                    new_params = {k: v for k, v in params.items() if k not in kwargs}
+                    # new_params有可能为空
+                    if not new_params:
+                        print(f"Warning: {key} has no remaining parameters after removing matched params, it will be ignored, use remove_matched_params=False to keep it")
+                        continue
+                else:
+                    new_params = params.copy()
+                subcontainer.set_value(self[key], **new_params)
+
+    def get_subcontainer(self, remove_matched_params=True, **kwargs):
+        """
+        根据参数条件获取子数据容器
+        
+        remove_matched_params: bool, 是否移除匹配的参数
+        kwargs: 关键字参数, 用于匹配子数据容器的参数
+
+        示例:
+        sub = dc.get_subcontainer(area='V1', prop='spike', remove_matched_params=True)
+        则返回一个新的DataContainer,其中包含所有匹配的参数,并且移除匹配的参数
+        sub = dc.get_subcontainer(area='V1', prop='spike', remove_matched_params=False)
+        则返回一个新的DataContainer,其中包含所有匹配的参数,并且保留匹配的参数
+        """
+        subcontainer = DataContainer(included_name_list=self.included_name_list)
+        self._set_subcontainer(subcontainer, remove_matched_params=remove_matched_params, **kwargs)
+        return subcontainer
+
+    def delete(self, exact_match=True, **kwargs):
+        '''
+        删除指定键的值
+        
+        exact_match: bool, 是否精确匹配, 默认为True, 只有完全匹配的键才会被删除, 如果为False, 则会删除所有包含指定参数的键
+        '''
+        if exact_match:
+            key = self.build_key(**kwargs)
+            if key in self:
+                del self[key]
+                del self['_config']['param_map'][key]
+            else:
+                raise KeyError(f"Key '{key}' not found in DataContainer")
+        else:
+            keys_to_delete = []
+            for key in self:
+                if key in self.ignore_key_list:
+                    continue
+                params = self['_config']['param_map'][key]
+                if is_subdict(kwargs, params):
+                    keys_to_delete.append(key)
+            for key in keys_to_delete:
+                del self[key]
+                del self['_config']['param_map'][key]
+
+    def absorb(self, other_container):
+        """
+        吸收另一个DataContainer的数据(有可能覆盖)
+        并根据当前容器的参数顺序重新生成键
+        """
+        self.absorb_with_new_params(other_container)
+
+    def absorb_from_dict(self, other_dict, dict_key_name, **kwargs):
+        '''
+        吸收另一个字典的数据(有可能覆盖)
+        '''
+        for key, value in other_dict.items():
+            param = {dict_key_name: key}
+            new_param = update_dict(param, kwargs)
+            new_key = self.build_key(**new_param)
+            self[new_key] = value
+            self['_config']['param_map'][new_key] = new_param.copy()  # 保存参数信息
+
+    def absorb_with_new_params(self, other_container, **kwargs):
+        '''
+        吸收另一个DataContainer的数据(有可能覆盖)
+        可以添加新的参数或者覆盖已有的参数
+
+        示例:
+        dc.absorb_with_new_params(other_container, new_param='new_value')
+        '''
+        for key in other_container:
+            if key in self.ignore_key_list:
+                continue  # 跳过内部参数顺序标记
+            # 获取原键对应的参数信息
+            if key not in other_container['_config']['param_map']:
+                raise KeyError(f"Key '{key}' 不在输入的 data_container 的 param_map 中, 这可能是因为它不是通过 set_value 方法设置的")
+            else:
+                params_from_other = other_container['_config']['param_map'][key]
+            # 生成新键并存储
+            new_params_from_other = update_dict(params_from_other, kwargs)
+            new_key = self.build_key(**new_params_from_other)
+            self[new_key] = other_container[key]
+            self['_config']['param_map'][new_key] = new_params_from_other.copy()  # 保存参数信息
+
+    def copy_with_adjusted_params(self, original_params, adjustments):
+        '''
+        复制数据,并调整键名
+
+        例如:
+        original_params = {'area': 'V1', 'prop': 'spike'}
+        adjustments = {'prop': 'spike_new'}
+        dc.copy_with_adjusted_params(original_params, adjustments)
+        '''
+        # 合并参数
+        new_params = original_params.copy()
+        new_params.update(adjustments)
+        
+        # 获取原始值
+        original_value = self.get_value(**original_params)
+        
+        # 设置新值
+        self.set_value(value=original_value, **new_params)
+
+    def move_with_adjusted_params(self, original_params, adjustments):
+        '''
+        移动数据,并调整键名
+        '''
+        self.copy_with_adjusted_params(original_params, adjustments)
+
+        original_key = self.build_key(**original_params)
+        del self[original_key]
+        del self['_config']['param_map'][original_key]
+
     def save(self):
         '''
         按照各类dict的函数存即可
@@ -3643,62 +4676,242 @@ class OrderedDataContainer(DataContainer):
     数据容器,内部是字典,但是可以使用kwargs访问value
 
     使用示例:
-    dc = DataContainer(param_order=['area', 'property', 'time_period'])
-    dc.set_value(area='V1', property='spike', time_period='pre_stimulus_period', value=1)
-    dc.get_value(area='V1', property='spike', time_period='pre_stimulus_period')  # 返回 1
+    dc = DataContainer(param_order=['area', 'prop', 'time_period'])
+    dc.set_value(area='V1', prop='spike', time_period='pre_stimulus_period', value=1)
+    dc.get_value(area='V1', prop='spike', time_period='pre_stimulus_period')  # 返回 1
 
-    可以不输入完全的参数
-    dc.set_value(area='V1', property='spike', value=1)
-    dc.get_value(area='V1', property='spike')  # 返回 1
+    # 可以不输入完全的参数
+    dc.set_value(area='V1', prop='spike', value=1)
+    dc.get_value(area='V1', prop='spike')  # 返回 1
 
-    可以从另一个DataContainer中合并数据
-    dc2 = DataContainer(param_order=['area', 'property', 'time_period'])
-    dc2.set_value(area='V1', property='spike', time_period='stimulus_period', value=2)
-    dc.merge_from(dc2)
-    '''
-    def __init__(self, param_order):
-        super().__init__()
-        self['_param_order'] = param_order
+    # 可以从另一个DataContainer中更新数据
+    dc2 = DataContainer(param_order=['area', 'prop', 'time_period'])
+    dc2.set_value(area='V1', prop='spike', time_period='stimulus_period', value=2)
+    dc.absorb(dc2)
+
+    # 可以在吸收时添加新的参数
+    dc.absorb_with_new_params(dc2, new_param='new_value')
+
+    # 可以从字典中吸收数据
+    dc.absorb_from_dict()
     
-    def _build_key(self, **kwargs):
-        """按param_order顺序构建下划线连接的键名"""
-        # 验证参数是否合法
-        for param in kwargs:
-            if param not in self['_param_order']:
-                raise ValueError(f"参数 '{param}' 不在预定义顺序 {self['_param_order']} 中")
-        # 按顺序拼接有效参数值
-        parts = []
-        for param in self['_param_order']:
-            if param in kwargs:
-                parts.append(str(kwargs[param]))
-        if not parts:
-            raise ValueError("至少需要提供一个有效参数")
-        return cat(*parts)
+    # 可以获取子数据容器
+    subcontainer = dc.get_subcontainer(area='V1', prop='spike')
+    '''
+    def __init__(self, param_order, included_name_list=None):
+        super().__init__(included_name_list=included_name_list)
+        self.key_builder = OrderedBuildKey(param_order=param_order, included_name_list=included_name_list)
+        self['_config']['param_order'] = param_order
 
-    def merge_from(self, other_container):
-        """
-        合并另一个 DataContainer 或 OrderedDataContainer 的数据
-        并根据当前容器的参数顺序重新生成键
-        """
-        if not isinstance(other_container, DataContainer):
-            raise TypeError("仅支持合并 DataContainer 或其子类实例")
+    def get_subcontainer(self, remove_matched_params=True, **kwargs):
+        # 保持原有的参数顺序
+        subcontainer = OrderedDataContainer(param_order=self['_config']['param_order'], included_name_list=self['_config']['included_name_list'])
+        # 直接调用父类的方法
+        self._set_subcontainer(subcontainer, remove_matched_params=remove_matched_params, **kwargs)
+        return subcontainer
 
-        for key in other_container:
-            if key in ['_param_order', '_params_map']:
-                continue  # 跳过内部参数顺序标记
-            # 获取原键对应的参数信息
-            if key not in other_container['_params_map']:
-                raise KeyError(f"Key '{key}' 不在输入的 data_container 的 _params_map 中, 这可能是因为它不是通过 set_value 方法设置的")
+
+def _dict_to_data_container(d):
+    '''
+    将字典转换为DataContainer对象(需要自带_config和其中的param_map)
+
+    示例:
+    读取了一个字典,并将其转换为DataContainer对象
+    '''
+    config = d.pop('_config')
+    param_order = config.pop('param_order', None)
+    param_map = config.pop('param_map')
+    included_name_list = config.pop('included_name_list', None)
+    if param_order is None:
+        data_container = DataContainer(included_name_list=included_name_list)
+    else:
+        data_container = OrderedDataContainer(param_order=param_order, included_name_list=included_name_list)
+    data_container['_config']['param_map'] = param_map
+    for key, value in d.items():
+        data_container[key] = value
+    return data_container
+# endregion
+
+
+# region data keeper
+class DataKeeper:
+    """
+    数据管理器：灵活管理不同类型的数据存储和读取
+    
+    注意:
+    如果需要,在保存后可调用mark_all_saved()方法来标记所有数据已保存
+    """
+    def __init__(self, name, basedir, data_type='dict', save_load_method='separate', param_order=None):
+        self.read_only = False  # 默认可读写
+
+        self.name = name
+        self.basedir = basedir
+        self.data_type = data_type
+        self.save_load_method = save_load_method
+        self.param_order = param_order
+        
+        # 初始化结果容器
+        if data_type == 'dict':
+            self.data = {}
+        elif data_type == 'OrderedDataContainer':
+            if not param_order:
+                raise ValueError("OrderedDataContainer requires param_order")
+            self.data = OrderedDataContainer(param_order=param_order)
+        else:
+            raise ValueError(f"Unknown data_type: {data_type}")
+        
+        # 配置存储加载方法
+        self._configure_save_load()
+        
+        # 尝试从已保存的数据中更新配置
+        self.update_config_from_saved()
+
+    def set_read_only(self, read_only):
+        '''
+        read_only为True时,阻止set_value和save方法的调用
+        '''
+        self.read_only = read_only
+
+    def _configure_save_load(self):
+        """配置数据保存和加载方法"""
+        valid_methods = ['separate', 'lmdb']
+        if self.save_load_method not in valid_methods:
+            raise ValueError(f"Invalid save_load_method. Must be one of {valid_methods}")
+            
+        if self.save_load_method == 'separate':
+            self.save_func = save_dict_separate_merge_to_saved
+            self.load_func = load_dict_separate_merge_to_exist
+            self.delete_func = delete_saved_dict_separate
+        elif self.save_load_method == 'lmdb':
+            self.save_func = save_dict_lmdb
+            self.load_func = load_dict_lmdb_merge_to_exist
+            self.delete_func = delete_saved_dict_lmdb
+
+    def _get_data_path(self):
+        """获取数据的完整存储路径"""
+        return pj(self.basedir, self.name)
+
+    def load(self, **kwargs):
+        """从磁盘加载数据"""
+        self.load_func(self.data, self._get_data_path(), **kwargs)
+
+    def update_config_from_saved(self):
+        """从已保存的数据中更新配置"""
+        if check_all_file_exist(self._get_data_path()):
+            self.load_func(self.data, self._get_data_path(), 
+                          key_to_load=['_config'], ensure_config=False)
+
+    def _get_key(self, key=None, **kwargs):
+        '''
+        有key时直接使用key,否则根据kwargs构建key(但只对OrderedDataContainer有效)
+        '''
+        if key is None:
+            if self.data_type != 'OrderedDataContainer':
+                raise ValueError("Key required for non-container types")
+            key = self.data.build_key(**kwargs)
+        return key
+
+    def set_value(self, value, key=None, **kwargs):
+        if self.read_only:
+            raise PermissionError("DataKeeper is read-only, cannot set value")
+        else:
+            if self.data_type == 'OrderedDataContainer':
+                self.data.set_value(value, **kwargs)
             else:
-                params_from_other = other_container['_params_map'][key]
-            # 生成新键并存储
-            new_key = self._build_key(**params_from_other)
-            self[new_key] = other_container[key]
-            self['_params_map'][new_key] = params_from_other
+                self.data[key] = value  # 直接设置值
+
+    def get_value(self, key=None, **kwargs):
+        """
+        获取单个数据值
+        - 对于dict: 直接使用key
+        - 对于OrderedDataContainer: 可使用关键字参数构建key
+        """
+        key = self._get_key(key, **kwargs)
+        
+        # 如果内存中没有则从磁盘加载
+        if key not in self.data:
+            self.load_func(self.data, self._get_data_path(), 
+                          key_to_load=[key], ensure_config=False)
+        return self.data[key]
+
+    def get_subcontainer(self, remove_matched_params=True, **kwargs):
+        """获取子数据集,仅支持OrderedDataContainer"""
+        if self.data_type != 'OrderedDataContainer':
+            raise ValueError("Subcontainers only available for OrderedDataContainer")
+        
+        # 确保所需key已加载
+        keys_to_load = self.data.get_partial_match_key_list(**kwargs)
+        existing_keys = set(self.data.keys())
+        missing_keys = [k for k in keys_to_load if k not in existing_keys]
+        
+        if missing_keys:
+            self.load_func(self.data, self._get_data_path(), 
+                          key_to_load=missing_keys, ensure_config=False)
+        
+        return self.data.get_subcontainer(
+            remove_matched_params=remove_matched_params, **kwargs
+        )
+
+    def save(self, **kwargs):
+        """保存数据到磁盘"""
+        if self.read_only:
+            raise PermissionError("DataKeeper is read-only, cannot save data")
+        else:
+            self.save_func(self.data, self._get_data_path(), **kwargs)
+            print_title(f"{self.name} saved")
+
+    def mark_all_saved(self):
+        """标记所有数据已保存"""
+        save_dict({f"{self.name}_all_saved": True},
+                  pj(self._get_data_path(), f"{self.name}_all_saved"))
+
+    def check_all_saved(self):
+        """检查保存状态"""
+        flag_path = pj(self._get_data_path(), f"{self.name}_all_saved")
+        if check_all_file_exist_with_any_extension(flag_path):
+            return True
+        else:
+            return False
+
+    def delete(self, **kwargs):
+        """删除数据"""
+        self.delete_func(self._get_data_path(), **kwargs)
+
+    def release_memory(self, keys_to_keep=None, keys_to_release=None):
+        """
+        释放内存中的数据,提供细粒度控制
+        
+        参数:
+        keys_to_keep - 指定要保留的键列表,优先于keys_to_release
+        keys_to_release - 指定要释放的键列表,默认释放所有键
+        
+        默认行为:
+        保留配置键'_config'
+        """
+        if keys_to_keep is None:
+            keys_to_keep = []
+        if keys_to_release is None:
+            keys_to_release = list(self.data.keys())  # 默认释放所有键
+        if '_config' not in keys_to_keep:
+            keys_to_keep.append('_config')  # 确保配置键始终被保留
+            
+        # 安全释放指定键
+        for key in keys_to_release:
+            if key in self.data and key not in keys_to_keep:
+                del self.data[key]
 # endregion
 
 
 # region list处理相关函数
+def append_unique(lst, item):
+    '''
+    向列表中添加元素,如果元素已经存在,则不添加
+    '''
+    if item not in lst:
+        lst.append(item)
+    return lst
+
+
 def flatten_list(input_list, level=None):
     '''
     展开嵌套列表(要求每一层都是列表)
@@ -3722,7 +4935,7 @@ def flatten_list(input_list, level=None):
     return flatten_recursive(input_list, 0)
 
 
-def union_list(*lists):
+def union_list(*lists, rm_repeat=True):
     '''
     获取多个列表的并集(去重)
     
@@ -3732,10 +4945,16 @@ def union_list(*lists):
     返回:
     - 一个列表，包含所有输入列表的并集
     '''
-    union_set = set()
-    for lst in lists:
-        union_set = union_set.union(set(lst))
-    return list(union_set)
+    if rm_repeat:
+        union_set = set()
+        for lst in lists:
+            union_set = union_set.union(set(lst))
+        return list(union_set)
+    else:
+        merged_list = []
+        for lst in lists:
+            merged_list.extend(lst)
+        return merged_list
 
 
 def intersect_list(*lists):
@@ -3752,6 +4971,37 @@ def intersect_list(*lists):
     for lst in lists[1:]:
         intersection_set = intersection_set.intersection(set(lst))
     return list(intersection_set)
+
+
+def remove_list_element(original_list, elements_to_remove, mode='skip'):
+    """
+    从列表中移除指定元素，可控制元素不存在时的处理模式。
+    
+    Args:
+        original_list: 原始列表
+        elements_to_remove: 需要移除的元素列表
+        mode: 处理模式，'skip'（默认跳过不存在元素）或 'raise'（元素不存在时报错）
+    
+    Returns:
+        list: 移除元素后的新列表
+    
+    Raises:
+        ValueError: 当模式为'raise'且存在元素不在原始列表中时
+    """
+    elements_to_remove_set = set(elements_to_remove)
+    
+    if mode == 'raise':
+        missing_elements = [elem for elem in elements_to_remove_set if elem not in original_list]
+        if missing_elements:
+            raise ValueError(f"Elements {missing_elements} not found in the list.")
+    elif mode != 'skip':
+        raise ValueError("Invalid mode. Use 'skip' or 'raise'.")
+
+    return [item for item in original_list if item not in elements_to_remove_set]
+
+@direct_use
+def get_element_index_in_list(element, lst):
+    return lst.index(element)
 
 
 def rebuild_list_with_index(flattened, original, index=0):
@@ -3803,6 +5053,18 @@ def list_shape(lst):
     if len(lst) == 0:
         return (0,)
     return (len(lst),) + list_shape(lst[0])
+
+
+def is_sublist(sub_list, main_list):
+    '''
+    判断一个列表是否是另一个列表的子集
+    '''
+    main_counter = Counter(main_list)
+    sub_counter = Counter(sub_list)
+    for elem, count in sub_counter.items():
+        if main_counter[elem] < count:
+            return False
+    return True
 # endregion
 
 
@@ -4110,6 +5372,41 @@ def get_arr_triangle_value(arr, triangle_type=None, diagonal=False):
     return arr[triangle_mask]
 
 
+def split_matrix_diag(M):
+    """
+    将矩阵 M 分成两个矩阵：
+    - 一个矩阵包含对角线元素，其他位置为 0
+    - 另一个矩阵包含非对角线元素，对角线位置为 0
+
+    参数:
+    M (numpy.ndarray): 输入矩阵
+
+    返回:
+    diag_matrix, non_diag_matrix (numpy.ndarray, numpy.ndarray): 对角线和非对角线矩阵
+    """
+    # 创建与 M 形状相同的全零矩阵
+    diag_matrix = np.zeros_like(M)
+    non_diag_matrix = np.zeros_like(M)
+
+    # 获取对角线成分并填充到对角线矩阵中
+    np.fill_diagonal(diag_matrix, np.diag(M))
+
+    # 将对角线位置置为 0，保留非对角线元素
+    non_diag_matrix = M - diag_matrix
+
+    return diag_matrix, non_diag_matrix
+
+
+def get_connection_idx_and_weight(weight_matrix):
+    '''
+    获取连接的索引和权重
+    '''
+    positions = np.argwhere(weight_matrix != 0)
+    i_indices = positions[:, 0]
+    j_indices = positions[:, 1]
+    connection_strengths = weight_matrix[i_indices, j_indices]
+    return i_indices, j_indices, connection_strengths
+
 def get_nearby_idx(arr, index, nearby_index):
     """
     获取给定多维数组 arr 中某个索引 index 前后 nearby_index 范围内的所有索引。
@@ -4223,7 +5520,7 @@ def insert_mid(arr):
 # endregion
 
 
-# region slice处理相关函数
+# region 切片,维数变换相关函数
 def get_index(*slices):
     """
     根据输入的 slices 返回一个可以直接用于 numpy 数组的索引.
@@ -4237,10 +5534,26 @@ def get_index(*slices):
     # 将 ':' 和 None 处理为 slice(None) 以表示整个维度
     indices = tuple(slice(None) if s == ':' or s is None else s for s in slices)
     return indices
-# endregion
 
 
-# region 切片,维数变换相关函数
+def slice_to_array(s):
+    # 获取 start、stop、step，处理 step 为 None 的情况
+    start = s.start
+    stop = s.stop
+    step = s.step if s.step is not None else 1
+
+    # 检查 start 或 stop 是否为 None
+    if start is None or stop is None:
+        raise ValueError("slice的 start 和 stop 不能为 None")
+
+    # 检查 step 是否为 0
+    if step == 0:
+        raise ValueError("slice的 step 不能为 0")
+
+    # 生成索引数组
+    return np.arange(start, stop, step)
+
+
 def get_slice(start=None, stop=None, step=None):
     '''
     创建一个 slice 对象。
@@ -4254,6 +5567,13 @@ def get_slice(start=None, stop=None, step=None):
     slice: 根据输入参数创建的 slice 对象。
     '''
     return slice(start, stop, step)
+
+
+def get_slice_length(s):
+    '''
+    获取 slice 对象的长度(即切片的元素个数)
+    '''
+    return len(range(s.start, s.stop, s.step)) if s.step else len(range(s.start, s.stop))
 
 
 def out_ensure_dim(arr, target_dim):
@@ -4486,6 +5806,15 @@ def sort_df(df, sort_by='index', axis=0, key=None, reverse=False):
         return df.sort_values(by=key, ascending=not reverse)
     else:
         raise ValueError("sort_by must be 'index' or 'values'")
+# endregion
+
+
+# region 特殊函数
+def identical_func(x):
+    '''
+    返回输入的参数，不做任何处理
+    '''
+    return x
 # endregion
 
 
@@ -5451,18 +6780,18 @@ def get_bin_idx(data, bins, right=False, left_most=True, right_most=True):
 
 def bin_timeseries(timeseries, bin_size, mode='mean'):
     """
-    将时间序列转换为Bin后的时间序列，每个Bin包含固定数量的元素。
+    将时间序列转换为Bin后的时间序列,每个Bin包含固定数量的元素
     
     参数:
     timeseries (list or np.array): 时间序列数据
     bin_size (int): 每个Bin包含的元素个数
-    mode (str): Bin后的时间序列的计算模式，可以是'mean'、'sum'。默认为'mean'。
+    mode (str): Bin后的时间序列的计算模式,可以是'mean','sum'.默认为'mean'
     
     返回:
-    np.array: Bin后的时间序列，每个值为每个Bin的平均值
+    np.array: Bin后的时间序列,每个值为每个Bin的平均值
 
     注意:
-    最后一点可能会被丢弃，以使时间序列的长度可以被bin_size整除。
+    最后一点可能会被丢弃,以使时间序列的长度可以被bin_size整除
     """
     # 确保timeseries是一个numpy数组
     timeseries = np.array(timeseries)
@@ -5470,7 +6799,7 @@ def bin_timeseries(timeseries, bin_size, mode='mean'):
     # 计算总的Bin数
     num_bins = len(timeseries) // bin_size
     
-    # 截取时间序列，使其长度可以被bin_size整除
+    # 截取时间序列,使其长度可以被bin_size整除
     trimmed_timeseries = timeseries[:num_bins * bin_size]
     
     # 将时间序列重塑为(num_bins, bin_size)的二维数组
@@ -5489,9 +6818,9 @@ def bin_timeseries(timeseries, bin_size, mode='mean'):
 
 def bin_multi_timeseries(multi_timeseries, bin_size, mode='mean'):
     '''
-    multi_timeseries: (N, T)的二维数组，N为时间序列的数量，T为时间序列的长度
-    bin_size: 每个Bin的大小（时间步数）
-    mode: 'mean' 或 'sum'，表示对每个Bin计算均值或求和
+    multi_timeseries: (N, T)的二维数组,N为时间序列的数量,T为时间序列的长度
+    bin_size: 每个Bin的大小(时间步数)
+    mode: 'mean' 或 'sum',表示对每个Bin计算均值或求和
     '''
     # 输入检查
     if not isinstance(multi_timeseries, np.ndarray):
@@ -5520,17 +6849,17 @@ def bin_multi_timeseries(multi_timeseries, bin_size, mode='mean'):
     return binned_timeseries
 
 
-def convolve_timeseries(timeseries, kernel, mode='valid'):
+def convolve_timeseries(timeseries, kernel, mode='full'):
     """
-    对时间序列进行卷积操作，并返回结果。
+    对时间序列进行卷积操作,并返回结果
 
     参数:
     timeseries (list or np.array): 时间序列数据
     kernel (list or np.array): 用于卷积的核
-    mode (str): 卷积模式，可以是'full'、'valid'或'same'。默认为'full'。
-                - 'full': 返回完整的卷积结果。
-                - 'valid': 仅返回完全重叠部分的卷积结果。
-                - 'same': 返回与输入时间序列长度相同的卷积结果。
+    mode (str): 卷积模式,可以是'full','valid'或'same'.默认为'full'.
+                - 'full': 返回完整的卷积结果
+                - 'valid': 仅返回完全重叠部分的卷积结果
+                - 'same': 返回与输入时间序列长度相同的卷积结果
 
     返回:
     np.array: 卷积后的时间序列
@@ -5545,20 +6874,15 @@ def convolve_timeseries(timeseries, kernel, mode='valid'):
     return convolved_timeseries
 
 
-def convolve_multi_timeseries(multi_timeseries, kernel, mode='valid'):
+def convolve_multi_timeseries(multi_timeseries, kernel, mode='full'):
     """
-    对多个时间序列进行卷积操作，并返回结果。
+    对多个时间序列进行卷积操作,并返回结果
 
     参数:
-    multi_timeseries (np.array): 一个形状为 (N, T) 的二维数组，N 为时间序列的数量，T 为时间序列的长度。
-    kernel (list or np.array): 用于卷积的核。
-    mode (str): 卷积模式，可以是 'full'、'valid' 或 'same'。默认为 'valid'。
-                - 'full': 返回完整的卷积结果。
-                - 'valid': 仅返回完全重叠部分的卷积结果。
-                - 'same': 返回与输入时间序列长度相同的卷积结果。
+    multi_timeseries (np.array): 一个形状为 (N, T) 的二维数组
 
     返回:
-    np.array: 卷积后的时间序列，形状为 (N, T')，其中 T' 取决于 mode 选项和 kernel 的长度。
+    np.array: 卷积后的时间序列,形状为 (N, T'),其中 T' 取决于 mode 选项和 kernel 的长度
     """
     # 确保 multi_timeseries 是一个 numpy 数组
     multi_timeseries = np.array(multi_timeseries)
@@ -5585,6 +6909,20 @@ def convolve_multi_timeseries(multi_timeseries, kernel, mode='valid'):
         convolved_timeseries[i] = scipy.signal.convolve(multi_timeseries[i], kernel, mode=mode)
 
     return convolved_timeseries
+
+
+def get_normalized_rectangular_kernal(width, dt):
+    width1 = int(width / 2 / dt) * 2 + 1
+    kernel = np.ones(width1) / width1
+    return kernel
+
+
+def convolve_timeseries_with_rectangular_kernal(timeseries, width, dt, mode='full'):
+    return convolve_timeseries(timeseries, get_normalized_rectangular_kernal(width, dt), mode=mode)
+
+
+def convolve_multi_timeseries_with_rectangular_kernal(multi_timeseries, width, dt, mode='full'):
+    return convolve_multi_timeseries(multi_timeseries, get_normalized_rectangular_kernal(width, dt), mode=mode)
 
 
 def lowess_smooth(x, y, frac=0.2):
@@ -5809,47 +7147,6 @@ def get_angle_3d(source, target, angle_type='rad', azim_range='0:360', elev_rang
         elev = elev[0]
 
     return azim, elev
-
-
-def get_uniform_angle_test_3d():
-    '''
-    Rayleigh's Uniformity Test Statistic (R)
-
-    这个指标我之前已经介绍过了,它直接衡量了数据点在球面上的聚集程度。
-    计算公式为:R = |∑xi| / n, 其中 xi 是单位向量,n 是数据点个数。
-    R 越接近 0 表示数据点分布越均匀。
-    Rao's Spacing Test (U)
-
-    这是一种非参数检验方法,用于检验数据点在球面上的间距是否服从均匀分布。
-    计算公式涉及计算相邻数据点间的角度差,并对这些角度差进行统计检验。
-    U 统计量服从标准正态分布,当 U 较小时表示数据点分布较为均匀。
-    Watson's U^2 Test
-
-    这也是一种非参数检验方法,用于检验数据点在球面上的分布是否服从均匀分布。
-    计算公式涉及计算数据点到球面中心的距离,并对这些距离进行统计检验。
-    U^2 统计量服从已知分布,当 U^2 较小时表示数据点分布较为均匀。
-
-
-    球面均匀性指标:
-
-    计算 Rayleigh 球面均匀性指标(Rayleigh's Uniformity Test Statistic)。该指标接近0表示向量在球面上分布较为均匀,接近1表示分布不均匀。
-    可以参考论文"Assessing the Uniformity of Spherical Data"中的公式计算该指标。
-
-    平均最近邻距离统计量(Mean Nearest Neighbor Distance Statistic)
-    计算球面数据点之间的平均最近邻距离,记为$\overline{R}$。若数据均匀分布在球面,则$\overline{R}$应当较小。可以通过模拟得到$\overline{R}$在均匀分布假设下的分布,从而计算p值检验均匀性。
-
-    Spherical Harmonic Analysis(球谐分析)
-    将球面数据点展开到球谐基函数上,得到系数$a_{lm}$。若数据均匀分布,则这些系数应当都接近0。定义统计量$S = \sum_{l=1}^{L}\sum_{m=-l}^{l}a_{lm}^2$,通过模拟得到$S$在均匀分布假设下的分布,计算p值。
-
-    Rayleigh's&Kuiper's Statistic(Rayleigh和Kuiper统计量)
-    这两个统计量基于球面数据的矢径分布(azimuthal distribution)和极径分布(polar distribution)。Rayleigh统计量检验这两个分布是否呈现均匀分布,而Kuiper统计量则检验它们是否与均匀分布有显著偏离。
-
-    Diggle's Spatial Statistic(Diggle空间统计量)
-    定义球面数据点之间的距离为$d=\arccos(\vec{x}i \cdot \vec{x}j)$。Diggle统计量为$D=\sum{i<j} d{ij}^2$,在均匀分布假设下较小。可通过模拟获得其分布进行检验。
-
-    Minimal Spanning Tree Statistic(最小生成树统计量)
-    '''
-    print('还没有细看，可能有有用的吧')
 
 
 def get_corr(x, y, nan_policy='drop', fill_value=0, inf_policy=INF_POLICY, sync=True):
@@ -6091,13 +7388,13 @@ def get_jsd(p, q, base=None, **kwargs):
     m = (np.array(p) + np.array(q)) / 2
     return (get_kl_divergence(p, m, base=base, **kwargs) + get_kl_divergence(q, m, base=base, **kwargs)) / 2
 
-@to_be_improved
+
 def get_fft(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
     '''
     执行快速傅里叶变换 (FFT) 并返回变换后的信号
     自动处理NaN值,通过线性插值填充NaN
 
-    注意: 这里的T需要以秒为单位，得到的结果才是以Hz为单位的
+    注意: 这里的T需要以秒为单位,得到的结果才是以Hz为单位的
     '''
     if T is None and sample_rate is None:
         raise ValueError("Either T or sample_rate must be provided")
@@ -6107,19 +7404,23 @@ def get_fft(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill
         timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
     n = len(clean_timeseries)
     yf = scipy.fft.fft(clean_timeseries)
-    xf = scipy.fft.fftfreq(n, T)[:n//2]
-    # yf = 2.0/n * np.abs(yf[0:n//2])
-    yf = np.abs(yf[0:n//2])                   # 取前半部分的幅度
-    yf[1:] = 2.0/n * yf[1:]                   # 除直流分量外，其余乘以 2/n
-    yf[0] = yf[0] / n                         # 直流分量只需除以 n
+    xf = scipy.fft.fftfreq(n, T)
+
+    xf = scipy.fft.fftshift(xf)
+    yf = scipy.fft.fftshift(yf)
     return xf, yf
+
+
+def get_ifft(s, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
+    ifft_s = scipy.fft.ifft(s)
+    pass
 
 
 def get_power_spectrum(timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY):
     '''
     利用welch方法计算功率谱密度并返回结果
 
-    注意: 这里的T需要以秒为单位，得到的结果才是以Hz为单位的
+    注意: 这里的T需要以秒为单位,得到的结果才是以Hz为单位的;如果以ms为单位,注意统一为秒
     '''
     if T is None and sample_rate is None:
         raise ValueError("Either T or sample_rate must be provided")
@@ -6131,15 +7432,15 @@ def get_power_spectrum(timeseries, T=None, sample_rate=None, nan_policy='interpo
     return f, Pxx
 
 
-def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
-    '''
-    计算自相关函数 (ACF) 并返回结果
-    自动处理NaN值,通过线性插值填充NaN
+def get_multi_power_spectrum(multi_timeseries, T=None, sample_rate=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+    r = multi_process_list_for(process_num=process_num, func=get_power_spectrum, for_list=multi_timeseries, kwargs={
+        'T': T, 'sample_rate': sample_rate, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy}, for_idx_name='timeseries')
+    f = r[0][0]
+    multi_Pxx = np.array([i[1] for i in r])
+    return f, multi_Pxx
 
-    参数:
-    timeseries: 一维数组,时间序列
-    nlags_policy: 'raise'或'clip','raise'表示nlags超出时间序列长度时抛出异常,'clip'表示截断nlags到时间序列长度
-    '''
+
+def _pre_process_for_acf(timeseries, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
     if T is None and sample_rate is None:
         raise ValueError("Either T or sample_rate must be provided")
     if T is None:
@@ -6151,7 +7452,20 @@ def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_poli
             raise ValueError("nlags must be less than the length of the timeseries")
     clean_timeseries = process_special_value(
         timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    return np.arange(nlags+1)*T, acf(clean_timeseries, nlags=nlags, fft=fft)
+    return T, nlags, clean_timeseries
+
+
+def get_acf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise', **kwargs):
+    '''
+    计算自相关函数 (ACF) 并返回结果
+    自动处理NaN值,通过线性插值填充NaN
+
+    参数:
+    timeseries: 一维数组,时间序列
+    nlags_policy: 'raise'或'clip','raise'表示nlags超出时间序列长度时抛出异常,'clip'表示截断nlags到时间序列长度
+    '''
+    T, nlags, clean_timeseries = _pre_process_for_acf(timeseries=timeseries, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, nlags_policy=nlags_policy)
+    return np.arange(nlags+1)*T, acf(clean_timeseries, nlags=nlags, fft=fft, **kwargs)
 
 
 def get_acovf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
@@ -6163,18 +7477,16 @@ def get_acovf(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_po
     timeseries: 一维数组,时间序列
     nlags_policy: 'raise'或'clip','raise'表示nlags超出时间序列长度时抛出异常,'clip'表示截断nlags到时间序列长度
     '''
-    if T is None and sample_rate is None:
-        raise ValueError("Either T or sample_rate must be provided")
-    if T is None:
-        T = 1 / sample_rate
-    if nlags > len(timeseries) - 1:
-        if nlags_policy == 'clip':
-            nlags = len(timeseries) - 1
-        elif nlags_policy == 'raise':
-            raise ValueError("nlags must be less than the length of the timeseries")
-    clean_timeseries = process_special_value(
-        timeseries, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    T, nlags, clean_timeseries = _pre_process_for_acf(timeseries=timeseries, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, nlags_policy=nlags_policy)
     return np.arange(nlags+1)*T, acovf(clean_timeseries, nlag=nlags, fft=fft)
+
+
+def get_acovf_without_center(timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
+    '''
+    E[x(t)x(t+tau)], 即ACOVF没有中心化
+    '''
+    T, nlags, clean_timeseries = _pre_process_for_acf(timeseries=timeseries, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, nlags_policy=nlags_policy)
+    return np.arange(nlags+1)*T, acovf(clean_timeseries, nlag=nlags, fft=fft) + np.mean(clean_timeseries)**2
 
 
 def get_ccf(x, y, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, nlags_policy='raise'):
@@ -6223,23 +7535,75 @@ def get_ccovf(x, y, T=None, sample_rate=None, nlags=None, nan_policy='interpolat
     注意:
     这里输入nlags后输出的是nlags+1的值(与acf的用法一样,包含0)
     '''
-    time_lags, ccf_values = get_ccf(x, y, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, nlags_policy=nlags_policy)
-    return time_lags, ccf_values * np.std(x) * np.std(y)
+    lag_times, ccf_values = get_ccf(x, y, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, nlags_policy=nlags_policy)
+    return lag_times, ccf_values * np.std(x) * np.std(y)
 
 
-def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1, **kwargs):
     '''
     处理多个时间序列的自相关函数 (ACF) 并返回结果,multi_timeseries的shape为(time_series_num, time_series_length)
     '''
-    # multi_acf = []
-    # for timeseries in multi_timeseries:
-    #     lag_times, acf_values = get_acf(timeseries, T=T, sample_rate=sample_rate, nlags=nlags, fft=fft, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
-    #     multi_acf.append(acf_values)
-    # return lag_times, np.array(multi_acf)
-    r = multi_process_list_for(process_num=process_num, func=get_acf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy}, for_idx_name='timeseries')
+    r = multi_process_list_for(process_num=process_num, func=get_acf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy, **kwargs}, for_idx_name='timeseries')
     lag_times = r[0][0]
     multi_acf = np.array([i[1] for i in r])
     return lag_times, multi_acf
+
+
+def get_multi_acovf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+    '''
+    处理多个时间序列的自协方差函数 (ACOVF) 并返回结果,multi_timeseries的shape为(time_series_num, time_series_length)
+    '''
+    r = multi_process_list_for(process_num=process_num, func=get_acovf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy}, for_idx_name='timeseries')
+    lag_times = r[0][0]
+    multi_acovf = np.array([i[1] for i in r])
+    return lag_times, multi_acovf
+
+
+def get_multi_acovf_without_center(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+    r = multi_process_list_for(process_num=process_num, func=get_acovf_without_center, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy}, for_idx_name='timeseries')
+    lag_times = r[0][0]
+    multi_acovf = np.array([i[1] for i in r])
+    return lag_times, multi_acovf
+
+
+def _get_multi_ccf_ccovf_single_process(i, x, multi_y, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, ccf_or_ccovf='ccf'):
+    '''
+    不使用multi_process的版本
+
+    i: x属于multi_x的第几个时间序列
+    '''
+    if ccf_or_ccovf == 'ccf':
+        f = get_ccf
+    elif ccf_or_ccovf == 'ccovf':
+        f = get_ccovf
+    else:
+        raise ValueError("ccf_or_ccovf must be 'ccf' or 'ccovf'")
+    ccf_or_ccovf_dict = {}
+    for j, y in enumerate(multi_y):
+        lag_times, ccf_or_ccovf_dict[(i, j)] = f(x, y, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy)
+    return lag_times, ccf_or_ccovf_dict
+
+
+def _get_multi_ccf_ccovf(multi_x, multi_y, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1, ccf_or_ccovf='ccf'):
+    '''
+    multi_x和multi_y的shape为(time_series_num_x, time_series_length)和(time_series_num_y, time_series_length)
+
+    返回的multi_ccf_or_ccovf为一个字典,键为(i, j),表示第i个时间序列和第j个时间序列的ccf或ccovf
+    '''
+    r = multi_process_enumerate_for(process_num=process_num, func=_get_multi_ccf_ccovf_single_process, for_list=multi_x, kwargs={'multi_y': multi_y, 'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy, 'ccf_or_ccovf': ccf_or_ccovf}, for_idx_name='i', for_item_name='x')
+    lag_times = r[0][0]
+    multi_ccf_or_ccovf = {}
+    for i in r:
+        multi_ccf_or_ccovf.update(i[1])
+    return lag_times, multi_ccf_or_ccovf
+
+
+def get_multi_ccf(multi_x, multi_y, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+    return _get_multi_ccf_ccovf(multi_x, multi_y, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, process_num=process_num, ccf_or_ccovf='ccf')
+
+
+def get_multi_ccovf(multi_x, multi_y, T=None, sample_rate=None, nlags=None, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1):
+    return _get_multi_ccf_ccovf(multi_x, multi_y, T=T, sample_rate=sample_rate, nlags=nlags, nan_policy=nan_policy, fill_value=fill_value, inf_policy=inf_policy, process_num=process_num, ccf_or_ccovf='ccovf')
 
 
 def get_hist(data, bins, stat='probability', nan_policy='drop', fill_value=0, inf_policy=INF_POLICY):
@@ -6472,31 +7836,306 @@ def repeat_data(data, repeat_times):
 
 
 # region 基础模型
-class MetaModel(abc.ABC):
+class MetaResultsMixin:
+    '''
+    将某个f'{results_prefix}_results'的结果设置为特定的类型,并且灵活的保存和读取
+    '''
+    def _set_results(self, results_prefix, results_type='dict', param_order=None):
+        '''
+        设置结果的类型并初始化
+        '''
+        setattr(self, f'{results_prefix}_results_type', results_type)
+        if results_type == 'dict':
+            setattr(self, f'{results_prefix}_results', {})
+        elif results_type == 'OrderedDataContainer':
+            setattr(self, f'{results_prefix}_results', OrderedDataContainer(param_order=param_order))
+
+    def _set_save_load_method(self, results_prefix, save_load_method='separate'):
+        '''
+        注意:
+        这里对于separate使用了save_dict_separate_merge_to_saved,方便只增加部分新results
+        '''
+        # 验证保存加载方法
+        acceptable_methods = ['separate', 'lmdb']
+        if save_load_method not in acceptable_methods:
+            raise ValueError(f'save_load_method must be one of {acceptable_methods}')
+        
+        # 设置基础属性名
+        save_attr = f'save_{results_prefix}_func'
+        load_attr = f'load_{results_prefix}_func'
+        method_attr = f'{results_prefix}_save_load_method'
+        
+        # 设置方法类型
+        setattr(self, method_attr, save_load_method)
+        
+        # 分配对应的函数
+        if save_load_method == 'separate':
+            setattr(self, save_attr, save_dict_separate_merge_to_saved)
+            setattr(self, load_attr, load_dict_separate_merge_to_exist)
+        elif save_load_method == 'lmdb':
+            setattr(self, save_attr, save_dict_lmdb)
+            setattr(self, load_attr, load_dict_lmdb_merge_to_exist)
+
+    def _load_results(self, results_prefix, **kwargs):
+        '''
+        读取结果
+
+        注意:
+        如果{results_prefix}_results是datacontainer,这个函数在读取已经保存的部分结果时,可能会覆盖_config
+        只建议在项目的一开始使用,后面建议使用get_{results_prefix}_value
+        '''
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        load_func = getattr(self, f'load_{results_prefix}_func')
+        load_func(results_dict, pj(self.outcomes_dir, f'{results_prefix}_results'), **kwargs)
+
+    def _update_config_from_saved_results(self, results_prefix):
+        '''
+        从已经保存的结果中更新_config
+        '''
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        if check_all_file_exist(pj(self.outcomes_dir, f'{results_prefix}_results')):
+            load_func = getattr(self, f'load_{results_prefix}_func')
+            load_func(results_dict, pj(self.outcomes_dir, f'{results_prefix}_results'), key_to_load=['_config'], ensure_config=False)
+        self.__setattr__(f'{results_attr}_config_updated', True)
+
+    def _get_results_value_by_key(self, results_prefix, key):
+        '''
+        从结果中获取值,但是只支持直接输入key
+        
+        此实现方式避免了一次性读取所有分析结果,节省内存
+        '''
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        if key in results_dict:
+            return results_dict[key]
+        else:
+            load_func = getattr(self, f'load_{results_prefix}_func')
+            partial_results = load_func(results_dict, pj(self.outcomes_dir, f'{results_prefix}_results'), key_to_load=[key], ensure_config=False)
+            return results_dict[key]
+
+    def _get_results_value(self, results_prefix, key=None, **kwargs):
+        '''
+        兼容dict和datacontainer的情况
+        '''
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        results_type = getattr(self, f'{results_prefix}_results_type')
+
+        if results_type == 'dict':
+            return self._get_results_value_by_key(results_prefix=results_prefix, key=key)
+        elif results_type == 'OrderedDataContainer':
+            if key is None:
+                key = results_dict.build_key(**kwargs)
+            return self._get_results_value_by_key(results_prefix=results_prefix, key=key)
+
+    def _get_results_subcontainer(self, results_prefix, remove_matched_params=True, **kwargs):
+        '''
+        从结果中获取子容器
+
+        注意:
+        不能直接使用self.{results_prefix}_results.get_subcontainer(**kwargs),因为有可能self.{results_prefix}_results没有读取所有的元素,直接使用会缺失这些元素
+        '''
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        
+        results_type = getattr(self, f'{results_prefix}_results_type')
+        if results_type == 'OrderedDataContainer':
+            # 保证读取需要的所有元素
+            key_to_load = results_dict.get_partial_match_key_list(**kwargs)
+            key_to_load = remove_list_element(key_to_load, list(results_dict.keys()))
+            
+            if key_to_load:
+                getattr(self, f'load_{results_prefix}_results')(key_to_load=key_to_load)
+            
+            # 利用get_subcontainer方法获取子容器
+            subcontainer = results_dict.get_subcontainer(remove_matched_params=remove_matched_params, **kwargs)
+            return subcontainer
+        else:
+            raise ValueError('Only OrderedDataContainer supports subcontainer')
+
+    def _save_results(self, results_prefix, filename, **kwargs):
+        results_attr = f'{results_prefix}_results'
+        results_dict = getattr(self, results_attr)
+        filename = pj(self.outcomes_dir, filename)
+        getattr(self, f'save_{results_prefix}_func')(results_dict, filename, **kwargs)
+        print_title(f'{self.model_name}: {results_prefix} results saved')
+
+    def _mark_all_results_saved(self, results_prefix):
+        '''
+        标志着所有结果都已经保存完毕
+        '''
+        save_dict({f'{results_prefix}_results_saved': True}, pj(self.outcomes_dir, f'{results_prefix}_results', f'{results_prefix}_results_saved'))
+
+    def _check_all_results_saved(self, results_prefix):
+        '''
+        确认是否所有结果都已经保存完毕
+        '''
+        if check_all_file_exist_with_any_extension(pj(self.outcomes_dir, f'{results_prefix}_results', f'{results_prefix}_results_saved')):
+            setattr(self, f'{results_prefix}_results_saved', True)
+            return True
+        else:
+            setattr(self, f'{results_prefix}_results_saved', False)
+            return False
+
+    def _delete_results(self, results_prefix):
+        '''
+        删除文件夹中的所有结果
+
+        注意:
+        一般不要对simulation使用
+        '''
+        rmdir(pj(self.outcomes_dir, f'{results_prefix}_results'))
+
+
+class MetaAnalyzerMixin(MetaResultsMixin):
+    def _analysis_params_setted(self):
+        self.analysis_params_setted = True
+
+    def set_analysis_params(self, analysis_params, set_to_attr=True):
+        '''
+        设置分析参数,子类如果修改,则注意不要放到params中,因为分析参数不需要search_params
+
+        如果子类忘记写_analysis_params_setted,后面analyze会因为没有self.analysis_params_setted而raise
+        '''
+        self.analysis_params = analysis_params
+        if set_to_attr:
+            for k, v in analysis_params.items():
+                if hasattr(self, k):
+                    raise ValueError(f'Attribute {k} already exists, please use another name')
+                setattr(self, k, v)
+        save_dict(analysis_params, pj(self.params_dir, 'analysis_params'))
+        self._analysis_params_setted()
+    
+    def set_analysis_task(self, analysis_task_list):
+        '''
+        设置分析结果的task列表
+        '''
+        self.analysis_task_list = analysis_task_list
+
+    def extend_analysis_task(self, *new_analysis_task):
+        if not hasattr(self, 'analysis_task_list'):
+            self.analysis_task_list = []
+        self.analysis_task_list.extend(new_analysis_task)
+    
+    def set_analysis_results(self, results_type='dict', param_order=None):
+        self._set_results(results_prefix='analysis', results_type=results_type, param_order=param_order)
+
+    def set_analysis_save_load_method(self, save_load_method='separate'):
+        self._set_save_load_method(results_prefix='analysis', save_load_method=save_load_method)
+
+    def whether_run_this_analysis_task(self, task):
+        if task in self.analysis_task_list or 'all' in self.analysis_task_list:
+            print_title(f'{self.model_name}: Analysis task {task} will be run')
+            return True
+        else:
+            print_title(f'{self.model_name}: Analysis task {task} will be skipped')
+            return False
+
+    def _check_analysis_params(self):
+        if not hasattr(self, 'analysis_params_setted') or not self.analysis_params_setted:
+            raise ValueError('Please set analysis params first! Also please check if you have set self._analysis_params_setted() in your subclass!')
+
+    def analyze_detail(self):
+        '''
+        子类可实现
+        '''
+        pass
+
+    def analyze(self):
+        '''
+        运行分析
+        '''
+        self._check_analysis_params()
+        analysis_timer = Timer(title=f'{self.model_name}: Analyze model')
+        analysis_timer.start()
+        self.analyze_detail()
+        self.save_analysis_results()
+        analysis_timer.end()
+
+    def load_analysis_results(self, **kwargs):
+        self._load_results(results_prefix='analysis', **kwargs)
+    
+    def get_analysis_value(self, key=None, **kwargs):
+        return self._get_results_value(results_prefix='analysis', key=key, **kwargs)
+    
+    def get_analysis_subcontainer(self, remove_matched_params=True, **kwargs):
+        return self._get_results_subcontainer(results_prefix='analysis', remove_matched_params=remove_matched_params, **kwargs)
+    
+    def save_analysis_results(self, filename='analysis_results', **kwargs):
+        self._save_results(results_prefix='analysis', filename=filename, **kwargs)
+
+    def delete_analysis_results(self):
+        self._delete_results(results_prefix='analysis')
+
+
+class MetaModel(abc.ABC, MetaAnalyzerMixin):
     '''
     一个元模型的基类，用于封装模型的参数设置,读取,保存;cpu,gpu设置;备份代码;设置logger等功能
+
+    注意:
+    当模型分为多个阶段,下一阶段依赖上一阶段结果时,可以嵌套Metamodel
+    这么做的好处是,上一阶段在不被修改的时候不会被频繁运行,而是可以读取到已有结果
+    例如,SNN生成连接可以单独作为一个model,运行snn也是一个model,运行SNN的model内部使用connection的model
+
+    警告:
+    当模型运算速度非常快,并且串行跑了多个,有可能导致timedir是一样的,这将导致后面的模型覆盖前面的模型
+    当使用multiprocess运行时也有可能发生这种情况,一般不会,但是记录在此
     '''
     def __init__(self):
         self.force_run = False
-        self.simulation_results = {} # 直接结果(simulation得到的),如果需要可以在子类改成DataContainer
-        self.analysis_results = {} # 分析结果(analysis得到的),如果需要可以在子类改成DataContainer
+        self.set_simulation_results() # 直接结果(simulation得到的),如果需要可以在子类改成DataContainer
+        self.set_analysis_results() # 分析结果(analysis得到的),如果需要可以在子类改成DataContainer
         self.pop = False
-        self.value_dir_key = []
-        self.both_dir_key = []
+        self.value_dir_key_before = []
+        self.both_dir_key_before = []
+        self.value_dir_key_after = []
+        self.both_dir_key_after = []
         self.ignore_key_list = []
+        self.code_file_list = []
+        self.set_current_time()
+        self.set_model_name()
+        self.set_optional_params_default()
 
     # region set things
-    def set_up(self, params, basedir, code_file_list, value_dir_key=None, both_dir_key=None, ignore_key_list=None, force_run=False):
+    def set_up(self, params, basedir, code_file_list, value_dir_key_before=None, both_dir_key_before=None, value_dir_key_after=None, both_dir_key_after=None, ignore_key_list=None, force_run=None):
         '''
         总体设置
+
+        注意:
+        不输入的参数会使用默认值
         '''
+        if value_dir_key_before is None:
+            value_dir_key_before = self.value_dir_key_before
+        if both_dir_key_before is None:
+            both_dir_key_before = self.both_dir_key_before
+        if value_dir_key_after is None:
+            value_dir_key_after = self.value_dir_key_after
+        if both_dir_key_after is None:
+            both_dir_key_after = self.both_dir_key_after
+        if ignore_key_list is None:
+            ignore_key_list = self.ignore_key_list
+        if force_run is None:
+            force_run = self.force_run
         self.set_params(params=params)
         self.set_basedir(basedir=basedir)
-        self.set_value_dir_both_dir_key(value_dir_key=value_dir_key, both_dir_key=both_dir_key)
+        self.set_value_dir_both_dir_key(value_dir_key_before=value_dir_key_before, both_dir_key_before=both_dir_key_before, value_dir_key_after=value_dir_key_after, both_dir_key_after=both_dir_key_after)
         self.set_ignore_key_for_search_params(ignore_key_list=ignore_key_list)
         self.create_timedir()
         self.set_code_file_list(code_file_list=code_file_list)
         self.set_force_run(force_run=force_run)
+
+    def set_optional_params_default(self):
+        self.set_analysis_task(['all'])
+        self.set_simulation_save_load_method(save_load_method='separate')
+        self.set_analysis_save_load_method(save_load_method='separate')
+
+    def set_visualizer_kwargs(self, **visualizer_kwargs):
+        '''
+        设置可视化器的参数,不放到params中,因为可视化器的参数不需要保存到文件中
+        '''
+        self.visualizer_kwargs = visualizer_kwargs
 
     def set_force_run(self, force_run=False):
         '''
@@ -6527,21 +8166,44 @@ class MetaModel(abc.ABC):
 
         注意:
         只有在希望单独运行analysis时才需要设置
+        timedir不一定以时间结尾,特殊情况下时间后面还会有value_dir_key_after,both_dir_key_after等产生的文件夹
         '''
         self.timedir = timedir
         self.load_params()
+        self.load_info_container()
+        self._update_config_from_saved_results('simulation')
+        self._update_config_from_saved_results('analysis')
 
-    def set_value_dir_both_dir_key(self, value_dir_key=None, both_dir_key=None):
+    def set_current_time(self, current_time=None):
+        '''
+        设置当前时间,如果不设置,则使用当前时间
+        '''
+        if current_time is None:
+            self.current_time = get_time()
+        else:
+            self.current_time = current_time
+
+    def set_model_name(self, model_name=None):
+        if model_name is None:
+            self.model_name = self.__class__.__name__
+        else:
+            self.model_name = model_name
+
+    def set_value_dir_both_dir_key(self, value_dir_key_before=None, both_dir_key_before=None, value_dir_key_after=None, both_dir_key_after=None):
         '''
         设置模型的value_dir_key和both_dir_key
 
         注意:
         输入none则不更新
         '''
-        if value_dir_key is not None:
-            self.value_dir_key = value_dir_key
-        if both_dir_key is not None:
-            self.both_dir_key = both_dir_key
+        if value_dir_key_before is not None:
+            self.value_dir_key_before = value_dir_key_before
+        if both_dir_key_before is not None:
+            self.both_dir_key_before = both_dir_key_before
+        if value_dir_key_after is not None:
+            self.value_dir_key_after = value_dir_key_after
+        if both_dir_key_after is not None:
+            self.both_dir_key_after = both_dir_key_after
 
     def set_ignore_key_for_search_params(self, ignore_key_list=None):
         '''
@@ -6568,11 +8230,15 @@ class MetaModel(abc.ABC):
                 setattr(self, key, value)
         self.params = params
 
-    def set_analysis_task(self, analysis_task_list):
+    def set_info_container(self, info_order):
         '''
-        设置分析结果的task列表
+        设置info_container
+
+        例子:
+        当模型有比较复杂的信息时,可以使用OrderedDataContainer来存储
+        info_container中的元素并不会被保存到params中,而是单独保存;并且info_container中的元素常常是params中的元素经过运算
         '''
-        self.analysis_task_list = analysis_task_list
+        self.info_container = OrderedDataContainer(param_order=info_order)
 
     def set_gpu(self, id=None):
         '''
@@ -6597,25 +8263,47 @@ class MetaModel(abc.ABC):
         设置logger
         '''
         self.logger = Logger()
-        self.logger.get_py_logger(basedir=self.logs_dir, filename=filename, filemode=filemode)
-    
+        self.logger.get_py_logger(basedir=self.logs_dir, filename=filename, filemode=filemode, name=self.timedir)
+        print_title(f'{self.model_name}: Logger initialized')
+
+    def set_simulation_results(self, results_type='dict', param_order=None):
+        '''
+        设置模拟结果的类型并初始化
+        '''
+        self._set_results(results_prefix='simulation', results_type=results_type, param_order=param_order)
+
+    def set_simulation_save_load_method(self, save_load_method='separate'):
+        self._set_save_load_method(results_prefix='simulation', save_load_method=save_load_method)
+
     def extend_ignore_key_list(self, *new_ignore_key):
         '''
         向ignore_key_list中添加新的key
         '''
         self.ignore_key_list.extend(new_ignore_key)
 
-    def extend_value_dir_key(self, *new_value_dir_key):
+    def extend_value_dir_key_before(self, *new_value_dir_key):
         '''
-        向value_dir_key中添加新的key
+        向value_dir_key_before中添加新的key
         '''
-        self.value_dir_key.extend(new_value_dir_key)
+        self.value_dir_key_before.extend(new_value_dir_key)
 
-    def extend_both_dir_key(self, *new_both_dir_key):
+    def extend_both_dir_key_before(self, *new_both_dir_key):
         '''
-        向both_dir_key中添加新的key
+        向both_dir_key_before中添加新的key
         '''
-        self.both_dir_key.extend(new_both_dir_key)
+        self.both_dir_key_before.extend(new_both_dir_key)
+    
+    def extend_value_dir_key_after(self, *new_value_dir_key):
+        '''
+        向value_dir_key_after中添加新的key
+        '''
+        self.value_dir_key_after.extend(new_value_dir_key)
+    
+    def extend_both_dir_key_after(self, *new_both_dir_key):
+        '''
+        向both_dir_key_after中添加新的key
+        '''
+        self.both_dir_key_after.extend(new_both_dir_key)
     # endregion
 
     # region run
@@ -6634,6 +8322,32 @@ class MetaModel(abc.ABC):
         '''
         运行模型
         '''
+        self.prepare_run()
+
+        # 通过属性判断执行
+        if self.should_run:
+            initialize_timer = Timer(title=f'{self.model_name}: Initialize model')
+            initialize_timer.start()
+            self.initialize_model()
+            initialize_timer.end()
+
+            run_timer = Timer(title=f'{self.model_name}: Run model')
+            run_timer.start()
+            self.run_detail()
+            run_timer.end()
+
+            self.finalize_run()
+
+    def simulate(self):
+        '''
+        run的别名
+        '''
+        self.run()
+
+    def prepare_run(self):
+        '''
+        run_detail的准备工作,包括search_params,check_simulation_results_exist,set_logger等
+        '''
         self.search_params()
         
         # 自动触发结果存在性检查(当参数存在时)
@@ -6642,19 +8356,14 @@ class MetaModel(abc.ABC):
 
         # 统一设置日志(此时timedir已确定)
         self.set_logger()
+        self.save_code()
 
-        # 通过属性判断执行
-        if self.should_run:
-            with WithTimer('Run'):
-                self.run_detail()
-            
-        self.finalize_run()
-
-    def simulate(self):
+    def initialize_model(self):
         '''
-        run的别名
+        部分模型需要在run前初始化,例如brainpy需要先构建net,monitor,runner才可以run
         '''
-        self.run()
+        self.save_info_container()
+        self.save_params()
 
     @abc.abstractmethod
     def run_detail(self):
@@ -6663,30 +8372,27 @@ class MetaModel(abc.ABC):
         """
         pass
 
+    def finalize_run_detail(self):
+        '''
+        子类可以更改
+        '''
+        if not self.simulation_results_exist:
+            self.save_simulation_results()
+
     def finalize_run(self):
         """
-        run的收尾操作
+        run的收尾操作,子类最好不要修改,而是修改finalize_run_detail
         """
-        if not self.simulation_results_exist:
-            self.save_params()
-            self.save_simulation_results()
-        self.save_code()
+        self.finalize_run_detail()
+        self._mark_all_results_saved('simulation')
     # endregion
 
-    # region analysis
-    def analyze_detail(self):
+    # region visualize
+    def get_visualizer(self):
         '''
-        子类可实现
+        子类可实现,赋值到self.visualizer
         '''
         pass
-
-    def analyze(self):
-        '''
-        运行分析
-        '''
-        with WithTimer('Analyze'):
-            self.analyze_detail()
-            self.save_analysis_results()
     # endregion
 
     # region dir
@@ -6694,9 +8400,15 @@ class MetaModel(abc.ABC):
         '''
         获取模型的时间文件夹
         '''
-        _, self.timedir = pop_dict_get_dir(self.params, self.value_dir_key, self.both_dir_key, self.basedir)
-        self.current_time = get_time()
-        self.timedir = pj(self.timedir, self.current_time)
+        _, self.before_timedir = pop_dict_get_dir(self.params, self.value_dir_key_before, self.both_dir_key_before, self.basedir)
+        _, self.after_timedir = pop_dict_get_dir(self.params, self.value_dir_key_after, self.both_dir_key_after, '')
+        self.timedir = pj(self.before_timedir, self.current_time, self.after_timedir)
+
+    def get_current_time_from_timedir(self):
+        '''
+        从timedir中获取当前时间
+        '''
+        return get_first_subdir(self.timedir, self.before_timedir)
 
     @property
     def logs_dir(self):
@@ -6738,16 +8450,16 @@ class MetaModel(abc.ABC):
         搜索运行过相同参数的文件夹
         '''
         if self.force_run:
-            print_title('Force run')
+            print_title(f'{self.model_name}: Force run')
             self.params_exist = False
         else:
-            self.params_exist_timedir, self.params_exist = search_dict_subdir(dict_data=self.params, basedir=self.basedir, pkl_name='params', value_dir_key=self.value_dir_key, both_dir_key=self.both_dir_key, after_subdir='params', ignore_key=self.ignore_key_list, pop=self.pop)
+            self.params_exist_timedir, self.params_exist = search_dict_subdir(dict_data=self.params, basedir=self.basedir, pkl_name='params', value_dir_key=self.value_dir_key_before, both_dir_key=self.both_dir_key_before, after_subdir=pj(self.after_timedir, 'params'), ignore_key=self.ignore_key_list, pop=self.pop)
             if self.params_exist:
-                print_title('Params exist')
+                print_title(f'{self.model_name}: Params exist')
                 self.original_timedir = self.timedir
-                self.timedir = self.params_exist_timedir
+                self.timedir = pj(self.params_exist_timedir, self.after_timedir)
             else:
-                print_title('Params do not exist')
+                print_title(f'{self.model_name}: Params do not exist')
 
     def check_simulation_results_exist(self):
         '''
@@ -6756,11 +8468,11 @@ class MetaModel(abc.ABC):
         注意:
         如果params_exist但是simulation_results不存在,说明之前的运行被中断了,需要重新运行,此时会新开一个timedir,而由于params_exist,timedir被设置为params_exist_timedir,所以需要在这里恢复timedir
         '''
-        self.simulation_results_exist = check_saved_dict_completeness(save_dir=pj(self.outcomes_dir, 'simulation_results'))
+        self.simulation_results_exist = self._check_all_results_saved('simulation')
         if self.simulation_results_exist:
-            print_title('Simulation results exist')
+            print_title(f'{self.model_name}: Simulation results exist')
         else:
-            print_title('Simulation results do not exist')
+            print_title(f'{self.model_name}: Simulation results do not exist')
             self.timedir = self.original_timedir # 恢复timedir
 
     def load_params(self):
@@ -6770,30 +8482,24 @@ class MetaModel(abc.ABC):
         self.params = load_pkl(pj(self.params_dir, 'params'))
         self.set_params(self.params)
 
-    def load_simulation_results(self):
-        '''
-        读取直接结果
-        '''
-        self.simulation_results = load_dict_separate(pj(self.outcomes_dir, 'simulation_results'))
+    def load_simulation_results(self, **kwargs):
+        self.simulation_results.update(load_dict_separate(pj(self.outcomes_dir, 'simulation_results'), **kwargs))
 
-    def get_value_from_simulation_results(self, key):
-        '''
-        从直接结果中获取值
+    def get_simulation_value(self, key=None, **kwargs):
+        return self._get_results_value(results_prefix='simulation', key=key, **kwargs)
 
-        此实现方式避免了一次性读取所有直接结果,节省内存
+    def get_simulation_subcontainer(self, remove_matched_params=True, **kwargs):
+        return self._get_results_subcontainer(results_type='simulation', remove_matched_params=remove_matched_params, **kwargs)
+
+    def load_info_container(self):
         '''
-        if key in self.simulation_results:
-            return self.simulation_results[key]
-        else:
-            partial_simulation_results = load_dict_separate(pj(self.outcomes_dir, 'simulation_results'), key_to_load=[key])
-            self.simulation_results.update(partial_simulation_results)
-            return partial_simulation_results[key]
-    
-    def get_simulation_value(self, key):
+        info container不一定存在,所以使用try except
         '''
-        get_value_from_simulation_results的简称
-        '''
-        return self.get_value_from_simulation_results(key)
+        try:
+            self.info_container = load_dict(pj(self.params_dir, 'info_container'))
+            self.key_builder = self.info_container.key_builder
+        except:
+            pass
     # endregion
 
     # region save
@@ -6808,28 +8514,697 @@ class MetaModel(abc.ABC):
         for sub_file in get_subfile(CF_DIR):
             if sub_file.endswith('.py'):
                 save_code_copy(self.code_dir, sub_file)
+        print_title(f'{self.model_name}: Code saved')
 
     def save_params(self):
         '''
         保存模型参数
         '''
-        save_timed_dir_dict(dict_data=self.params, basedir=self.basedir, dict_name='params', value_dir_key=self.value_dir_key, both_dir_key=self.both_dir_key, after_timedir='params', current_time=self.current_time, pop=self.pop)
-        print_title('Params saved')
+        if hasattr(self, 'params') and self.params_exist is False:
+            # 注意如果params_exist为True,说明已经保存过了,不需要再保存
+            save_timed_dir_dict(dict_data=self.params, basedir=self.basedir, dict_name='params', value_dir_key=self.value_dir_key_before, both_dir_key=self.both_dir_key_before, after_timedir=pj(self.after_timedir, 'params'), current_time=self.current_time, pop=self.pop)
+            print_title(f'{self.model_name}: Params saved')
+        else:
+            print_title(f'{self.model_name}: No params to save')
 
-    def save_simulation_results(self):
+    def save_info_container(self):
         '''
-        保存simulation结果
+        保存info_container
         '''
-        save_dict_separate(self.simulation_results, pj(self.outcomes_dir, 'simulation_results'))
-        print_title('Simulation results saved')
-    
-    def save_analysis_results(self):
-        '''
-        保存分析结果
-        '''
-        save_dict_separate(self.analysis_results, pj(self.outcomes_dir, 'analysis_results'))
-        print_title('Analysis results saved')
+        if hasattr(self, 'info_container'):
+            save_dict(self.info_container, pj(self.params_dir, 'info_container')) # info_container一般比较小但是包含的元素可能比较多,所以直接保存更好
+            print_title(f'{self.model_name}: Info container saved')
+
+    def save_simulation_results(self, filename='simulation_results', **kwargs):
+        self._save_results(results_prefix='simulation', filename=filename, **kwargs)
     # endregion
+# endregion
+
+
+# region 基础模型(compose version)
+class ParamBasedDirManager:
+    def __init__(self):
+        self.timedir_injected = False
+        self.kwargs = {
+            'value_dir_key_before': [],
+            'both_dir_key_before': [],
+            'value_dir_key_after': [],
+            'both_dir_key_after': [],
+            'ignore_key_list': [],
+            'pop': False
+        }
+
+    def update_kwargs(self, **kwargs):
+        '''
+        因为不同的参数可能会在不同的时间段输入,如basedir(experiment给了接口),params(pipeline的第一个将params输入),所以这里必须用kwargs.update()的方式来更新参数
+        
+        示例:
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+        这样可以根据代码文件名自动创建文件夹
+
+        注意:
+        basedir和timedir是不同的
+        '''
+        self.kwargs.update(kwargs)
+
+    def finalize_init(self):
+        self.params = self.kwargs['params']
+        self.basedir = self.kwargs['basedir']
+        self.value_dir_key_before = self.kwargs['value_dir_key_before']
+        self.both_dir_key_before = self.kwargs['both_dir_key_before']
+        self.value_dir_key_after = self.kwargs['value_dir_key_after']
+        self.both_dir_key_after = self.kwargs['both_dir_key_after']
+        self.ignore_key_list = self.kwargs['ignore_key_list']
+        self.pop = self.kwargs['pop']
+
+        _, self.before_timedir = pop_dict_get_dir(self.params, self.value_dir_key_before, self.both_dir_key_before, self.basedir)
+        _, self.after_timedir = pop_dict_get_dir(self.params, self.value_dir_key_after, self.both_dir_key_after, '')
+
+        self.set_current_time()
+
+    def set_timedir(self, timedir, prefix=''):
+        '''
+        设置模型的时间文件夹
+
+        示例:
+        当已经手动确定了模型的时间文件夹时,可以直接设置,方便之后运行analysis
+
+        注意:
+        只有在希望单独运行analysis时才需要设置
+        timedir不一定以时间结尾,特殊情况下时间后面还会有value_dir_key_after,both_dir_key_after等产生的文件夹
+        '''
+        self.timedir = timedir
+        self.timedir_injected = True
+        self.load_params(prefix=prefix)
+
+    def set_current_time(self, current_time=None, update_timedir=True):
+        '''
+        设置当前时间,如果不设置,则使用当前时间
+        '''
+        if current_time is None:
+            self.current_time = get_time()
+        else:
+            self.current_time = current_time
+        if update_timedir:
+            self.create_timedir()  # 重新创建timedir
+
+    def create_timedir(self):
+        '''
+        获取模型的时间文件夹
+        '''
+        self.timedir = pj(self.before_timedir, self.current_time, self.after_timedir)
+
+    def get_current_time_from_timedir(self):
+        '''
+        从timedir中获取当前时间
+        '''
+        return get_first_subdir(self.timedir, self.before_timedir)
+
+    @property
+    def logs_dir(self):
+        return pj(self.timedir, 'logs')
+
+    @property
+    def figs_dir(self):
+        return pj(self.timedir, 'figs')
+    
+    @property
+    def models_dir(self):
+        return pj(self.timedir, 'models')
+    
+    @property
+    def outcomes_dir(self):
+        return pj(self.timedir, 'outcomes')
+
+    @property
+    def params_dir(self):
+        return pj(self.timedir, 'params')
+
+    @property
+    def codes_dir(self):
+        return pj(self.timedir, 'code')
+
+    def search_params(self, prefix=''):
+        '''
+        搜索运行过相同参数的文件夹
+        '''
+        self.params_exist_timedir, self.params_exist = search_dict_subdir(dict_data=self.params, basedir=self.basedir, pkl_name=cat(prefix, 'params'), value_dir_key=self.value_dir_key_before, both_dir_key=self.both_dir_key_before, after_subdir=pj(self.after_timedir, 'params'), ignore_key=self.ignore_key_list, pop=self.pop)
+        if self.params_exist:
+            print_title('Params exist')
+            self.timedir = pj(self.params_exist_timedir, self.after_timedir)
+            return True
+        else:
+            print_title('Params do not exist')
+            return False
+
+    def load_params(self, prefix='', set_to_self=True):
+        '''
+        读取模型参数(适用于手动设置了timedir的情况)
+        '''
+        params = load_pkl(pj(self.params_dir, cat(prefix, 'params')))
+        if set_to_self:
+            self.params = params
+        return params
+
+
+class CodeSaver:
+    def __init__(self, dir_manager):
+        self.dir_manager = dir_manager
+
+    def set_code_file_list(self, code_file_list):
+        '''
+        设置模型代码文件列表
+
+        示例:
+        code_file_list = [cf.current_file(), '../../utils_function/utils_function.py']
+        '''
+        self.code_file_list = code_file_list
+
+    def save_code(self):
+        '''
+        备份模型代码
+        '''
+        codes_dir = self.dir_manager.codes_dir
+
+        # 保存code_file
+        for code_file in self.code_file_list:
+            save_code_copy(codes_dir, code_file)
+        # 保存CF_DIR下的所有函数
+        for sub_file in get_subfile(CF_DIR):
+            if sub_file.endswith('.py'):
+                save_code_copy(codes_dir, sub_file)
+        print_title(f'Code saved')
+
+
+class AbstractTool(abc.ABC):
+    def __init__(self):
+        self.already_done = False
+        self._set_name()  # 子类必须实现_set_name方法,用于设置name属性
+        self.enable_search = False # search 有两步,第一步为寻找参数,第二步为check_all_saved
+        self.enable_skip = False # 是否跳过已经完成的任务,默认是False,子类可以修改
+        self.enable_try = False # 是否允许尝试运行,如果运行失败则不报错,默认是False,子类可以修改
+        self.release_memory = False # 是否在运行结束后释放内存,默认是False,子类可以修改
+        self.release_memory_kwargs = {} # 用于设置释放内存的kwargs,子类可以修改
+        self.set_params_to_attr = True # 是否将params中的参数设置到实例属性中,默认是True,子类可以修改
+        self.dir_manager_kwargs = {} # 用于设置dir_manager的kwargs,子类可以修改
+
+    @abc.abstractmethod
+    def _set_name(self):
+        pass
+
+    def set_params(self, params):
+        self.params = params
+        if self.set_params_to_attr:
+            for key, value in params.items():
+                setattr(self, key, value)
+        self.dir_manager_kwargs['params'] = self.params
+
+    def input_dir_manager(self, dir_manager):
+        '''
+        不同tool之间共享dir_manager,所以从外部传入dir_manager
+        '''
+        self.dir_manager = dir_manager
+
+    def finalize_init_dir_manager(self):
+        self.dir_manager.update_kwargs(**self.dir_manager_kwargs)
+        self.dir_manager.finalize_init()
+
+    def input_previous_info(self, data_keeper, params):
+        '''
+        只允许从前一个tool传入data_keeper和params
+        '''
+        data_keeper_name = data_keeper.name
+        setattr(self, f'{data_keeper_name}_data_keeper', data_keeper)
+        setattr(self, f'{data_keeper_name}_params', params)
+
+    def propagate_info(self):
+        if self.data_keeper is not None: # 比如Visualizer没有data_keeper
+            pass
+        else:
+            self.data_keeper.set_read_only(True)  # 确保后续的tool只能读取数据
+        return self.data_keeper, self.params
+
+    def config_data_keeper(self, data_keeper_name=None, data_keeper_kwargs=None):
+        if data_keeper_name is None:
+            self.data_keeper_name = self.name
+        else:
+            self.data_keeper_name = data_keeper_name
+        if data_keeper_kwargs is None:
+            self.data_keeper_kwargs = {}
+        else:
+            self.data_keeper_kwargs = data_keeper_kwargs
+
+    def init_data_keeper(self):
+        self.data_keeper = DataKeeper(name=self.data_keeper_name, basedir=self.dir_manager.outcomes_dir, **self.data_keeper_kwargs)
+
+    def search_params_when_enabled(self):
+        if self.enable_search:
+            params_exist = self.dir_manager.search_params(prefix=self.name)
+            self.init_data_keeper() # 切换了dir_manager,需要重新初始化data_keeper
+            self.check_all_saved()
+            if params_exist and (not self.already_done):
+                print_title(f'{self.name}: Not all results saved, create new dir')
+                self.dir_manager.set_current_time()
+        else:
+            print_title(f'{self.name}: Search params is disabled, skip search')
+
+    def check_all_saved(self):
+        self.already_done = self.data_keeper.check_all_saved()
+
+    def save_params(self):
+        save_dict(self.params, pj(self.dir_manager.params_dir, cat(self.name, 'params')))
+
+    def before_run(self):
+        self.save_params()
+
+    @abc.abstractmethod
+    def run_detail(self):
+        pass
+
+    def after_run(self):
+        self.data_keeper.save()
+        if self.enable_skip:
+            self.data_keeper.mark_all_saved()
+        if self.release_memory:
+            self.data_keeper.release_memory(**self.release_memory_kwargs)
+
+    def run(self):
+        def _run():
+            self.before_run()
+            self.run_detail()
+            self.after_run()
+
+        if self.already_done:
+            print_title(f'{self.name}: already done, skip')
+        else:
+            timer = Timer(title=f'{self.name}: running')
+            timer.start()
+
+            if self.enable_try:
+                try:
+                    _run()
+                except Exception as e:
+                    print_title(f'{self.name}: run failed with error: {e}, but continue running')
+            else:
+                _run()
+
+            timer.end()
+    
+    def load_params(self):
+        self.params = self.dir_manager.load_params(prefix=self.name, set_to_self=False)
+        self.set_params(self.params)
+
+
+class Trainer(AbstractTool):
+    def __init__(self):
+        super().__init__()
+        self.enable_search = True
+        self.enable_skip = True
+
+
+class Simulator(AbstractTool):
+    def __init__(self):
+        super().__init__()
+        self.enable_search = True
+        self.enable_skip = True
+
+
+class Analyzer(AbstractTool):
+    def __init__(self):
+        super().__init__()
+        self.enable_try = True # 失败了问题不大,先try尽可能往后运行
+
+
+class Visualizer(AbstractTool):
+    def __init__(self):
+        super().__init__()
+        self.enable_try = True # 失败了问题不大,先try尽可能往后运行
+
+    def config_data_keeper(self, **kwargs):
+        '''
+        dummy
+        '''
+        pass
+
+    def init_data_keeper(self):
+        '''
+        dummy
+        '''
+        pass
+
+    def check_all_saved(self):
+        '''
+        dummy
+        '''
+        pass
+
+
+class ToolsPipeLine:
+    '''
+    只允许self._pipeline中的第一个tool寻找参数和确定timedir
+    所有tool共享dir_manager
+
+    experiment中有name,因为子类的experiment会有自己的具有辨识度的name
+    而tools_pipeline一般不会有子类,也就不需要name
+    '''
+    def __init__(self):
+        self._pipeline = []
+        self.timedir_injected = False
+
+    def set_timedir(self, timedir):
+        self.timedir = timedir
+        self.timedir_injected = True
+
+    def inject_tools(self, dir_manager, code_saver, *tools):
+        self.dir_manager = dir_manager
+        self.code_saver = code_saver
+        name_list = []
+        for tool in tools:
+            tool.input_dir_manager(dir_manager)
+            self._pipeline.append(tool)
+            name_list.append(tool.name)
+        if len(set(name_list)) != len(name_list):
+            raise ValueError('Tool names must be unique, found duplicates: {}'.format(name_list))
+
+    def set_dir_manager_timedir_by_first_tool(self):
+        tool = self._pipeline[0]
+        self.dir_manager.set_timedir(self.timedir, prefix=tool.name)
+
+    def search_params_for_first_tool(self):
+        tool = self._pipeline[0]
+        tool.finalize_init_dir_manager() # 可能要换个位置
+        tool.search_params_when_enabled()
+
+    def init_data_keeper_for_each_tool(self):
+        for tool in self._pipeline:
+            tool.init_data_keeper()
+
+    def load_params_for_each_tool(self):
+        for tool in self._pipeline:
+            tool.load_params()
+
+    def check_results_for_each_tool(self):
+        for tool in self._pipeline:
+            tool.check_all_saved()
+
+    def before_run(self):
+        if self.timedir_injected:
+            self.set_dir_manager_timedir_by_first_tool()
+            self.load_params_for_each_tool()
+            self.init_data_keeper_for_each_tool()
+        else:
+            self.search_params_for_first_tool()
+            self.init_data_keeper_for_each_tool()
+            self.check_results_for_each_tool()
+            self.code_saver.save_code()
+
+    def run_detail(self):
+        if self.timedir_injected:
+            pass
+        else:
+            for i, tool in enumerate(self._pipeline):
+                tool.run()
+                if i < len(self._pipeline) - 1:
+                    for downstream_tool in self._pipeline[i + 1:]:
+                        downstream_tool.input_previous_info(*tool.propagate_info())
+
+    def after_run(self):
+        # 收集所有tool的data_keeper和params
+        self.data_keeper_dict = {}
+        self.params_dict = {}
+        for tool in self._pipeline:
+            self.data_keeper_dict[tool.name] = tool.data_keeper
+            self.params_dict[tool.name] = tool.params
+
+    def run(self):
+        self.before_run()
+        self.run_detail()
+        self.after_run()
+
+
+class Experiment(abc.ABC):
+    '''
+    使用场景:
+    1. 创建新文件夹并运行所有实验
+        experiment = Experiment()
+        experiment.set_basedir('../../results')
+        experiment.set_code_file_list([cf.current_file()])
+        experiment.run()
+    2. 寻找已有的文件夹,并运行实验中尚未完成的部分
+        experiment = Experiment()
+        experiment.set_basedir('../../results')
+        experiment.set_code_file_list([cf.current_file()])
+        experiment.run()
+    3. 设置current_time,将运行在一个指定time的文件夹中
+        experiment = Experiment()
+        experiment.set_basedir('../../results')
+        experiment.set_code_file_list([cf.current_file()])
+        experiment.set_current_time('2025_11_11_12_00_00') # 甚至可以是experiment.set_current_time('best')这种模式,消除每次时间戳的差异
+        experiment.run()
+    4. 只手动设置了运行完成的文件夹,不运行,但表现和运行结束完全一致(自动获取params和data_keeper等)
+        experiment = Experiment()
+        experiment.load('../../results/2025_11_11_12_00_00')
+        # 后续可随意获取tool的params和data_keeper等
+        experiment.simulator.data_keeper.get_value('some_key')
+
+    注意:
+    子类一般要结合特定的tool,这些新tool在设计时需要继承AbstractTool,并实现其run_detail方法;可以修改data_keeper的储存方式;dir_manager的设置方式等
+
+    最好自行设置name,不同experiment之间的交互通过data_keeper和params的传递来实现,而读取其他experiment的这些信息需要name
+    如果使用自动设置的name,并无问题,但将导致无法单独更换compose的experiment,因为改变name会导致无法找到之前的params和data_keeper
+    '''
+    def __init__(self):
+        self.timedir_injected = False
+        self._set_name()  # 子类必须实现_set_name方法,用于设置name属性
+        self.code_file_list = []
+
+    @abc.abstractmethod
+    def _set_name(self):
+        pass
+
+    def set_timedir(self, timedir):
+        self.timedir = timedir
+        self.timedir_injected = True
+
+    def set_current_time(self, current_time):
+        self.current_time = current_time
+
+    def set_previous_timedir(self, previous_timedir):
+        '''
+        用于compose多个experiment,可以从后往前寻找timedir
+        '''
+        save_pkl(previous_timedir, pj(self.dir_manager.params_dir, 'previous_timedir'))
+        save_txt(previous_timedir, pj(self.dir_manager.params_dir, 'previous_timedir'))
+        self.previous_timedir = previous_timedir
+
+    def get_previous_timedir(self):
+        self._init_tools()
+        self._init_dir_manager()
+        self.previous_timedir = load_pkl(pj(self.dir_manager.params_dir, 'previous_timedir'))
+        return self.previous_timedir
+
+    def input_previous_info(self, data_keeper_dict, params_dict, name):
+        setattr(self, f'{name}_data_keeper_dict', data_keeper_dict)
+        setattr(self, f'{name}_params_dict', params_dict)
+
+    def propagate_info(self):
+        return self.pipeline.data_keeper_dict, self.pipeline.params_dict, self.name
+
+    def load(self, timedir):
+        self.set_timedir(timedir)
+        self.run()
+
+    def set_basedir(self, basedir):
+        self.basedir = basedir
+
+    def _init_dir_manager(self):
+        self.dir_manager = ParamBasedDirManager()
+        if self.timedir_injected:
+            # 根据pipeline的第一个tool获取params和prefix来设置timedir
+            self.dir_manager.set_timedir(self.timedir, prefix=self.tools[0].name)
+        else:
+            self.dir_manager.update_kwargs(basedir=self.basedir)
+        if hasattr(self, 'current_time'):
+            self.dir_manager.set_current_time(self.current_time, update_timedir=False)  # 不更新timedir,因为dir_manager还没有拿到params,不能产生before_timedir和after_timedir
+            for tool in self.tools:
+                tool.enable_search = False  # 如果手动设置了current_time,则不需要搜索参数
+            print_title(f'{self.name}: Set current time to {self.current_time}, disable search_params for all tools')
+
+    def set_code_file_list(self, code_file_list):
+        self.code_file_list = code_file_list
+
+    def _init_code_saver(self):
+        self.code_saver = CodeSaver(self.dir_manager)
+        self.code_saver.set_code_file_list(self.code_file_list)
+
+    @abc.abstractmethod
+    def _minimal_init_tools(self):
+        '''
+        比如,创建Trainer,Simulator,Analyzer等工具实例,并将它们添加到self.tools中
+        '''
+        self.tools = []
+
+    def _finalize_init_tools(self):
+        for tool in self.tools:
+            tool.config_data_keeper()
+
+    def _init_tools(self):
+        self._minimal_init_tools()
+        self._finalize_init_tools()
+
+    def _minimal_init_pipeline(self):
+        self.pipeline = ToolsPipeLine()
+
+    def _finalize_init_pipeline(self):
+        self.pipeline.inject_tools(
+            self.dir_manager,
+            self.code_saver,
+            *self.tools
+        )
+        if self.timedir_injected:
+            self.pipeline.set_timedir(self.timedir)
+
+    def _init_pipeline(self):
+        self._minimal_init_pipeline()
+        self._finalize_init_pipeline()
+
+    def before_run(self):
+        self._init_tools()
+        self._init_dir_manager() # dir_manager依赖第一个tool的params和prefix
+        self._init_code_saver()
+        self._init_pipeline()
+        self.pipeline.before_run()
+
+    def run_detail(self):
+        self.pipeline.run_detail()
+
+    def after_run(self):
+        self.pipeline.after_run()
+
+    def run(self):
+        self.before_run()
+        self.run_detail()
+        self.after_run()
+
+
+class ExperimentPipeLine:
+    '''
+    包含多个experiment,后面的experiment必须依赖前面的experiment的结果(否则,可创建多个experiment实例).此时,手动设置timedir会设置最后一个experiment,前面的experiment会自动获取timedir
+    '''
+    def __init__(self):
+        self.experiments = []
+        self.timedir_injected = False
+
+    def set_timedir(self, timedir):
+        self.timedir = timedir
+        self.timedir_injected = True
+
+    def inject_experiments(self, *experiments):
+        name_list = []
+        for experiment in experiments:
+            self.experiments.append(experiment)
+            name_list.append(experiment.name)
+        if len(set(name_list)) != len(name_list):
+            raise ValueError('Experiment names must be unique, found duplicates: {}'.format(name_list))
+
+    def set_dir_manager_timedir_in_reverse_order(self):
+        for i, experiment in enumerate(self.experiments[::-1]):
+            if i == 0:
+                experiment.set_timedir(self.timedir)
+            else:
+                experiment.set_timedir(previous_timedir)
+            if i < len(self.experiments) - 1:
+                previous_timedir = experiment.get_previous_timedir()
+
+    def before_run(self):
+        if self.timedir_injected:
+            self.set_dir_manager_timedir_in_reverse_order()
+        else:
+            pass
+
+    def run_detail(self):
+        for i, experiment in enumerate(self.experiments):
+            experiment.run()
+            if i > 0: # 必须从前面获取,而不是向后面传递,后面的experiment尚未创建dir_manager
+                experiment.set_previous_timedir(self.experiments[i-1].dir_manager.timedir)
+            if i < len(self.experiments) - 1:
+                for downstream_experiment in self.experiments[i + 1:]:
+                    downstream_experiment.input_previous_info(
+                        *experiment.propagate_info()
+                    )
+
+    def after_run(self):
+        pass
+
+    def run(self):
+        self.before_run()
+        self.run_detail()
+        self.after_run()
+
+
+class ComposedExperiment(abc.ABC):
+    def __init__(self):
+        self.experiments = []
+        self.timedir_injected = False
+
+    def set_timedir(self, timedir):
+        self.timedir = timedir
+        self.timedir_injected = True
+
+    def load(self, timedir):
+        self.set_timedir(timedir)
+        self.run()
+
+    def set_basedir(self, basedir):
+        self.basedir = basedir
+
+    def set_code_file_list(self, code_file_list):
+        self.code_file_list = code_file_list
+
+    @abc.abstractmethod
+    def _minimal_init_experiments(self):
+        self.experiments = []
+
+    def _finalize_init_experiments(self):
+        if self.timedir_injected:
+            pass
+        else:
+            for experiment in self.experiments:
+                experiment.set_basedir(pj(self.basedir, experiment.name))
+                experiment.set_code_file_list(self.code_file_list)
+
+    def _init_experiments(self):
+        self._minimal_init_experiments()
+        self._finalize_init_experiments()
+
+    def _minimal_init_pipeline(self):
+        self.pipeline = ExperimentPipeLine()
+
+    def _finalize_init_pipeline(self):
+        self.pipeline.inject_experiments(*self.experiments)
+        if self.timedir_injected:
+            self.pipeline.set_timedir(self.timedir)
+
+    def _init_pipeline(self):
+        self._minimal_init_pipeline()
+        self._finalize_init_pipeline()
+
+    def before_run(self):
+        self._init_experiments()
+        self._init_pipeline()
+        self.pipeline.before_run()
+
+    def run_detail(self):
+        self.pipeline.run_detail()
+
+    def after_run(self):
+        self.pipeline.after_run()
+
+    def run(self):
+        self.before_run()
+        self.run_detail()
+        self.after_run()
 # endregion
 
 
@@ -8300,7 +10675,11 @@ def inset_ax(ax, left, right, bottom, top, label='inset', inset_mode='fig', **kw
     elif inset_mode == 'ax':
         width = right - left
         height = top - bottom
-        return ax.inset_axes([left, bottom, width, height], label=cat(ax.get_label(), label), **kwargs)
+        new_ax = ax.inset_axes([left, bottom, width, height], label=cat(ax.get_label(), label), **kwargs)
+
+        # 将new_ax添加到ax的custom_children中
+        add_custom_child_to_ax(ax, new_ax, label)
+        return new_ax
 
 @iterate_over_axs
 def reparent_ax(ax, parent_ax, label='inset', **kwargs):
@@ -9135,6 +11514,30 @@ def merge_ax(axs, rm_mode='rm_axis', label='merge'):
 # endregion
 
 
+# region 初级作图函数(ax的custom_child)
+def add_custom_child_to_ax(ax, child, child_name):
+    '''
+    向ax中添加一个自定义的子元素(放置于ax.custom_children中)
+    '''
+    if not hasattr(ax, 'custom_children'):
+        ax.custom_children = {}
+    if child_name not in ax.custom_children:
+        ax.custom_children[child_name] = child
+    else:
+        new_child_name = child_name + '_new'
+        add_custom_child_to_ax(ax, child, new_child_name)
+
+
+def get_custom_child_from_ax(ax, child_name):
+    if not hasattr(ax, 'custom_children'):
+        raise ValueError('ax没有custom_children属性')
+    if child_name in ax.custom_children:
+        return ax.custom_children[child_name]
+    else:
+        raise ValueError(f'ax的custom_children中没有{child_name}, 所有的custom_children为{ax.custom_children.keys()}')
+# endregion
+
+
 # region 初级作图函数(获取多个ax的位置的极值)
 def get_extreme_ax_position(axs, position):
     '''
@@ -9514,6 +11917,12 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, ticks=None, tick_labels=None, dis
     # 根据vmin和vmax来clip这个mappable的范围
     mappable.set_clim(vmin, vmax)
 
+    # 根据vmin和vmax判断是否add_leq和add_geq
+    if vmin < mappable.norm.vmin:
+        add_leq = True
+    if vmax > mappable.norm.vmax:
+        add_geq = True
+
     # 设置mask_cbar_ratio
     if mask_cbar_ratio is None:
         mask_cbar_ratio = 0.2
@@ -9677,8 +12086,11 @@ def add_colorbar(ax, mappable=None, cmap=CMAP, ticks=None, tick_labels=None, dis
 
     # return cbar
     if use_mask:
+        add_custom_child_to_ax(ax, mask_cbar, f'mask_cbar_{mask_tick}')
+        add_custom_child_to_ax(ax, cbar, f'cbar_{cbar_label}')
         return [cbar, mask_cbar]
     else:
+        add_custom_child_to_ax(ax, cbar, f'cbar_{cbar_label}')
         return [cbar]
 
 @iterate_over_axs
@@ -11206,6 +13618,51 @@ def plt_density_scatter(ax, x, y, label=None, label_cmap_float=1.0, estimate_typ
     return plt_colorful_scatter(ax, x, y, c=z, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, label=label, label_cmap_float=label_cmap_float, scatter_kwargs=scatter_kwargs, cbar=cbar, cbar_postion=cbar_position, cbar_kwargs=cbar_kwargs)
 
 
+def plt_density_line(ax, x, y, stat='density', bins_x=None, bins_y=None, cmap=DENSITY_CMAP, norm_mode='linear', vmin=None, vmax=None, norm_kwargs=None, cbar=True, cbar_label=None, cbar_position=None, cbar_kwargs=None, imshow_kwargs=None):
+    '''
+    将线按照密度,使用imshow
+
+    x: (n, ) or (n, m), m为线的个数
+    y: (n, ) or (n, m), m为线的个数
+    '''
+    if cbar_label is None:
+        cbar_label = 'density'
+    if cbar_kwargs is None:
+        cbar_kwargs = {}
+    if imshow_kwargs is None:
+        imshow_kwargs = {}
+    x = np.array(x)
+    y = np.array(y)
+    if x.ndim == 1 and y.ndim == 1:
+        pass
+    elif x.ndim == 2 and y.ndim == 2:
+        pass
+    elif x.ndim == 1 and y.ndim == 2:
+        # 将x重复到y的形状
+        x = np.repeat(x, y.shape[1]).reshape(y.shape)
+    elif x.ndim == 2 and y.ndim == 1:
+        # 将y重复到x的形状
+        y = np.repeat(y, x.shape[1]).reshape(x.shape)
+    
+    if x.shape != y.shape:
+        raise ValueError(f'After some processing, x and y still have different shapes: {x.shape} and {y.shape}. Please check your input data.')
+
+    if bins_x is None:
+        bins_x = x.shape[0] // 10
+    if bins_y is None:
+        bins_y = y.shape[0] // 10
+    value, bin_edges_x, bin_edges_y, _, _ = get_hist_2d(x.flatten(), y.flatten(), bins_x=bins_x, bins_y=bins_y, stat=stat)
+    
+    if vmin is None:
+        vmin = np.nanmin(value)
+    if vmax is None:
+        vmax = np.nanmax(value)
+    norm = get_norm(norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs)
+    im = plt_imshow(ax, value.T, cmap=cmap, norm=norm, extent=[bin_edges_x[0], bin_edges_x[-1], bin_edges_y[0], bin_edges_y[-1]], origin='lower', aspect='auto', **imshow_kwargs) # no need to pass vmin and vmax to imshow, because norm has been set
+    cbar = add_side_colorbar(ax, im, cmap=cmap, cbar_label=cbar_label, cbar_position=cbar_position, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, norm_mode=norm_mode, **cbar_kwargs)
+    return im, cbar, bin_edges_x, bin_edges_y
+
+
 def plt_marginal_density_scatter(ax, x, y, x_side_ax=None, y_side_ax=None, density_scatter_kwargs=None, marginal_kwargs=None):
     '''
     绘制密度散点图和边缘分布。
@@ -11613,10 +14070,6 @@ def plt_polygon_heatmap(ax, xy_dict, value_dict, mask=None, mask_color=MASK_COLO
         
     # 添加colorbar
     if cbar:
-        if vmin > np.nanmin(list(value_dict.values())):
-            cbar_kwargs['add_leq'] = True
-        if vmax < np.nanmax(list(value_dict.values())):
-            cbar_kwargs['add_geq'] = True
         return add_side_colorbar(ax, cmap=cmap, norm_mode=norm_mode, vmin=vmin, vmax=vmax, norm_kwargs=norm_kwargs, cbar_label=cbar_label, cbar_position=cbar_position, use_mask=use_mask, mask_color=mask_color, **cbar_kwargs)
 
 
@@ -11648,8 +14101,8 @@ def plt_qq_plot(ax, data_x, data_y, n_quantiles=None, scatter_color=BLUE, line_c
     plt_line(ax, [quantiles_x.min(), quantiles_x.max()], [quantiles_y.min(), quantiles_y.max()], color=line_color, **line_kwargs)
 
     # 添加ks检验的结果
-    ks, p = get_ks_and_p(data_x, data_y)
-    text_dict = {'KS': ks, 'P': p}
+    r = get_ks_result(data_x, data_y)
+    text_dict = {'KS': r['ks'], 'P': r['p']}
     add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
 
     # 添加标题
@@ -11693,8 +14146,8 @@ def plt_pp_plot(ax, data_x, data_y, n_points=None, scatter_color=BLUE, line_colo
     plt_line(ax, min_max_range, min_max_range, color=line_color, **line_kwargs)
 
     # 添加ks检验的结果
-    ks, p = get_ks_and_p(data_x, data_y)
-    text_dict = {'KS': ks, 'P': p}
+    r = get_ks_result(data_x, data_y)
+    text_dict = {'KS': r['ks'], 'P': r['p']}
     add_text_by_dict(ax, text_dict=text_dict, show_list=show_list, round_digit_dict=round_digit_dict, round_format_dict=round_format_dict, fontsize=fontsize, text_x=text_x, text_y=text_y, text_kwargs=text_kwargs)
 
     # 添加标题
@@ -12537,6 +14990,19 @@ def get_plt_color(n):
         props = next(cycler_iterator)
         colors.append(props['color'])
     return colors
+
+
+def scale_color(color, scale):
+    '''
+    输入(r,g,b)的颜色,和一个缩放比例,返回缩放后的颜色
+    '''
+    new_color = list(c * scale for c in color)
+    for i, c in enumerate(new_color):
+        if c > 1.0:
+            new_color[i] = 1.0
+        elif c < 0.0:
+            new_color[i] = 0.0
+    return tuple(new_color)
 # endregion
 
 
@@ -13505,6 +15971,16 @@ def adjust_ax_tick(ax, xtick_rotation=XTICK_ROTATION, ytick_rotation=YTICK_ROTAT
     # 旋转y轴刻度标签
     ax.set_yticks(ax.get_yticks())
     ax.set_yticklabels(ax.get_yticklabels(), rotation=ytick_rotation)
+
+
+def get_tick_rotation(ax, axis):
+    '''
+    获取轴的刻度标签的旋转角度
+    '''
+    if axis == 'x':
+        return ax.xaxis.get_ticklabels()[0].get_rotation()
+    elif axis == 'y':
+        return ax.yaxis.get_ticklabels()[0].get_rotation()
 # endregion
 
 
@@ -13538,7 +16014,7 @@ def set_ax_legend(ax, loc=LEGEND_LOC, fontsize=LEGEND_SIZE, bbox_to_anchor=None,
 
 # region 通用函数(一键调整ax)
 @iterate_over_axs
-def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_label=None, ytick_label=None, ztick_label=None, xtick_size=None, ytick_size=None, ztick_size=None, xtick_rotation=0, ytick_rotation=0, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend=True, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, rm_exist_legend=True, legend_kwargs=None, tight_layout=False, reset_scale=False):
+def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylabel_pad=LABEL_PAD, zlabel_pad=LABEL_PAD, title=None, title_pad=TITLE_PAD, text_process=None, title_size=TITLE_SIZE, label_size=LABEL_SIZE, tick_size=TICK_SIZE, xtick=None, ytick=None, ztick=None, xtick_label=None, ytick_label=None, ztick_label=None, xtick_size=None, ytick_size=None, ztick_size=None, xtick_rotation=None, ytick_rotation=None, adjust_tick_size=True, tick_proportion=TICK_PROPORTION, legend=True, legend_size=LEGEND_SIZE, xlim=None, ylim=None, zlim=None, xlog=False, ylog=False, zlog=False, elev=None, azim=None, legend_loc=LEGEND_LOC, bbox_to_anchor=None, rm_exist_legend=True, legend_kwargs=None, tight_layout=False, reset_scale=False):
     '''
     设置图表的轴、标题、范围和图例
 
@@ -13562,6 +16038,10 @@ def set_ax(ax, xlabel=None, ylabel=None, zlabel=None, xlabel_pad=LABEL_PAD, ylab
     '''
     text_process = update_dict(TEXT_PROCESS, text_process)
     legend_kwargs = update_dict({}, legend_kwargs)
+    if xtick_rotation is None:
+        xtick_rotation = get_tick_rotation(ax, 'x')
+    if ytick_rotation is None:
+        ytick_rotation = get_tick_rotation(ax, 'y')
     is_3d = isinstance(ax, Axes3D)
 
     # 尝试获取x_label和y_label
@@ -14269,9 +16749,31 @@ def get_gs_inside_gs(gs, index=None, nrows=1, ncols=1, wspace=None, hspace=None,
 class SingleVisualizer:
     '''
     可视化单个对象
+
+    save_fig_kwargs的调整可以方便的影响每次的save_fig,方便在测试时使用png和低dpi,而在正式时使用pdf和高dpi
     '''
-    def __init__(self, title):
+    def __init__(self, title, save_fig_kwargs=None):
         self.title = title
+        self.update_save_fig_kwargs(save_fig_kwargs)
+
+    def get_fig_ax(self, **kwargs):
+        self.fig, self.ax = get_fig_ax(**kwargs)
+        return self.fig, self.ax
+
+    def update_save_fig_kwargs(self, save_fig_kwargs):
+        '''
+        更新save_fig_kwargs
+        '''
+        self.save_fig_kwargs = update_dict({}, save_fig_kwargs)
+
+    def save_fig(self, filename, save_fig_kwargs=None, fig=None):
+        '''
+        保存fig
+        '''
+        if fig is None:
+            fig = self.fig
+        save_fig_kwargs = update_dict(self.save_fig_kwargs, save_fig_kwargs)
+        save_fig(fig, filename, **save_fig_kwargs)
 
 
 class MultiVisualizer(SingleVisualizer):
@@ -14285,12 +16787,26 @@ class MultiVisualizer(SingleVisualizer):
     全脑的不同参数,可以以全脑的MultiVisualizer作为一个SingleVisualizer
     '''
     def __init__(self, single_visualizer_list, save_fig_kwargs=None, fig_title_list=None, title=None):
+        '''
+        注意:
+        fig_title_list: 用于设置fig的标题,如果不设置,则使用title_list作为标题(所以它可以重复),因为仅仅用于图片内,而不会用于索引single_visualizer_list
+        '''
         self.title_list = [single_visualizer.title for single_visualizer in single_visualizer_list]
         self.single_visualizer_list = single_visualizer_list.copy()
-        self.update_save_fig_kwargs(save_fig_kwargs)
         self.set_fig_title_list(fig_title_list)
-        super().__init__(title=title)
+        super().__init__(title=title, save_fig_kwargs=save_fig_kwargs)
     
+    def update_save_fig_kwargs(self, save_fig_kwargs):
+        '''
+        更新save_fig_kwargs
+
+        注意:
+        会同步更新所有的single_visualizer的save_fig_kwargs
+        '''
+        super().update_save_fig_kwargs(save_fig_kwargs)
+        for single_visualizer in self.single_visualizer_list:
+            single_visualizer.update_save_fig_kwargs(save_fig_kwargs)
+
     @property
     def num(self):
         return len(self.single_visualizer_list)
@@ -14449,12 +16965,6 @@ class MultiVisualizer(SingleVisualizer):
         func_list = [getattr(single_visualizer, func_name) for single_visualizer in self.single_visualizer_list]
         self.multi_ax_plot(func_list, kwargs_list)
 
-    def update_save_fig_kwargs(self, save_fig_kwargs):
-        '''
-        更新save_fig_kwargs
-        '''
-        self.save_fig_kwargs = update_dict({}, save_fig_kwargs)
-
     def save_fig(self, filename, save_fig_kwargs=None):
         '''
         保存fig
@@ -14542,6 +17052,28 @@ class MultiVisualizerByCol(MultiVisualizer):
         使用父类,但是自动设定ncols
         '''
         return super().get_fig_subfig_ax(subfig_nrows, self.num, separate, get_suitable_fig_size_kwargs, get_fig_subfig_kwargs, get_ax_kwargs)
+
+
+class PaperFigVisualizer(SingleVisualizer):
+    '''
+    为Paper使用,通过统一的figs_dir来保存fig
+
+    注意:
+    如果没有输入version,figs_dir后面会被加上时间戳,所以每次运行都会生成新的文件夹,这种方式可以避免覆盖之前的fig
+    '''
+    def __init__(self, figs_dir, version=None, title=None, save_fig_kwargs=None):
+        if version is None:
+            version = get_time()
+        self.figs_dir = pj(figs_dir, version)
+        super().__init__(title=title, save_fig_kwargs=save_fig_kwargs)
+
+    def auto_save_fig(self, filename=None, save_fig_kwargs=None, fig=None):
+        '''
+        自动按照调用者的函数名保存fig
+        '''
+        if filename is None:
+            filename = pj(self.figs_dir, sys._getframe(1).f_code.co_name)
+        self.save_fig(filename, save_fig_kwargs=save_fig_kwargs, fig=fig)
 # endregion
 
 

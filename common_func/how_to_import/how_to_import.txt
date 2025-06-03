@@ -1,0 +1,17 @@
+-Both in home or data folder, common_functions can be imported by the following code:
+
+import sys
+sys.path.append(r'/data/zyjin/common_func/')
+
+print(sys.path)
+import common_functions as cf
+fig, ax = cf.gfa() # 检测是否import成功
+
+-anthoer way(recommand)
+
+import sys
+sys.path.append(r'/data/zyjin/')
+
+print(sys.path)
+import common_func.common_functions as cf
+fig, ax = cf.gfa() # 检测是否import成功
