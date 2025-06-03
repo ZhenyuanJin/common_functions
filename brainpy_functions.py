@@ -61,6 +61,8 @@ from brainpy._src.math.object_transform.base import StateLoadResult
 
 
 # 自定义库
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import common_functions as cf
 # endregion
 
