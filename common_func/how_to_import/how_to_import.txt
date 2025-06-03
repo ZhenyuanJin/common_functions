@@ -15,3 +15,23 @@ sys.path.append(r'/data/zyjin/')
 print(sys.path)
 import common_func.common_functions as cf
 fig, ax = cf.gfa() # 检测是否import成功
+
+
+!!!Note that:
+if you git clone from github, then you should use
+
+import sys
+sys.path.append(r'/data/zyjin/common_functions/common_func')
+
+print(sys.path)
+import common_functions as cf
+fig, ax = cf.gfa() # 检测是否import成功
+
+-anthoer way(recommand)
+
+import sys
+sys.path.append(r'/data/zyjin/common_functions')
+
+print(sys.path)
+import common_func.common_functions as cf
+fig, ax = cf.gfa() # 检测是否import成功
