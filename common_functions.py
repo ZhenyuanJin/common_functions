@@ -40,6 +40,7 @@ from collections import defaultdict, Counter
 import yaml
 import lmdb
 from pympler import asizeof
+import traceback
 
 
 # 数学和科学计算库
@@ -1810,6 +1811,56 @@ def func_memory_tracer(func):
         
         return result
     return wrapper
+
+
+def get_detailed_error():
+    exc_type, exc_value, exc_trace = sys.exc_info()
+    if not exc_type:
+        return
+    
+    # 获取错误基本信息
+    error_name = exc_type.__name__
+    error_msg = str(exc_value)
+    
+    # 获取最后一条堆栈记录
+    stack_summary = traceback.extract_tb(exc_trace)
+    last_frame = stack_summary[-1] if stack_summary else None
+    
+    # 构造详细日志
+    error_info = f"""
+    ======== 错误详情 ========
+    错误类型: {error_name}
+    错误信息: {error_msg}
+    发生文件: {last_frame.filename if last_frame else 'unknown'}
+    错误行号: {last_frame.lineno if last_frame else 0}
+    问题代码: {last_frame.line if last_frame else 'unknown'}
+    ======== 堆栈跟踪 ========
+    {traceback.format_exc()}
+    """
+    return error_info
+
+
+class FlexibleTry:
+    '''
+    示例:
+    with FlexibleTry(enable_try=True):
+        print(1/0)  # 会捕获异常并打印详细错误信息
+    with FlexibleTry(enable_try=False):
+        print(1/0)  # 会抛出异常
+    '''
+    def __init__(self, enable_try=True):
+        self.enable_try = enable_try
+        
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.enable_try and exc_type:
+            # 当启用异常捕获且发生异常时，获取详细错误信息
+            error_info = get_detailed_error()
+            print(error_info)  # 打印详细错误信息
+            return True  # 吞掉异常
+        return False  # 禁用时或没有异常时让异常传播
 # endregion
 
 
@@ -7896,8 +7947,11 @@ class MetaResultsMixin:
         results_attr = f'{results_prefix}_results'
         results_dict = getattr(self, results_attr)
         if check_all_file_exist(pj(self.outcomes_dir, f'{results_prefix}_results')):
-            load_func = getattr(self, f'load_{results_prefix}_func')
-            load_func(results_dict, pj(self.outcomes_dir, f'{results_prefix}_results'), key_to_load=['_config'], ensure_config=False)
+            try:
+                load_func = getattr(self, f'load_{results_prefix}_func')
+                load_func(results_dict, pj(self.outcomes_dir, f'{results_prefix}_results'), key_to_load=['_config'], ensure_config=False)
+            except Exception as e:
+                print(f'Error loading config from {results_prefix}_results: {e}')
         self.__setattr__(f'{results_attr}_config_updated', True)
 
     def _get_results_value_by_key(self, results_prefix, key):
@@ -8816,24 +8870,16 @@ class AbstractTool(abc.ABC):
             self.data_keeper.release_memory(**self.release_memory_kwargs)
 
     def run(self):
-        def _run():
-            self.before_run()
-            self.run_detail()
-            self.after_run()
-
         if self.already_done:
             print_title(f'{self.name}: already done, skip')
         else:
             timer = Timer(title=f'{self.name}: running')
             timer.start()
-
-            if self.enable_try:
-                try:
-                    _run()
-                except Exception as e:
-                    print_title(f'{self.name}: run failed with error: {e}, but continue running')
-            else:
-                _run()
+            
+            with FlexibleTry(enable_try=self.enable_try):
+                self.before_run()
+                self.run_detail()
+                self.after_run()
 
             timer.end()
     
