@@ -4761,7 +4761,7 @@ class DataKeeper:
             raise ValueError(f"Unknown data_type: {data_type}")
         
         # 配置存储加载方法
-        self._configure_save_load()
+        self._config_save_load()
         
         # 尝试从已保存的数据中更新配置
         self.update_config_from_saved()
@@ -4772,7 +4772,7 @@ class DataKeeper:
         '''
         self.read_only = read_only
 
-    def _configure_save_load(self):
+    def _config_save_load(self):
         """配置数据保存和加载方法"""
         valid_methods = ['separate', 'lmdb']
         if self.save_load_method not in valid_methods:
@@ -4797,7 +4797,7 @@ class DataKeeper:
 
     def update_config_from_saved(self):
         """从已保存的数据中更新配置"""
-        if check_all_file_exist(self._get_data_path()):
+        if check_all_file_exist(self._get_data_path()) and self.data_type == 'OrderedDataContainer':
             self.load_func(self.data, self._get_data_path(), 
                           key_to_load=['_config'], ensure_config=False)
 
@@ -8581,7 +8581,11 @@ class ParamBasedDirManager:
         _, self.before_timedir = pop_dict_get_dir(self.params, self.value_dir_key_before, self.both_dir_key_before, self.basedir)
         _, self.after_timedir = pop_dict_get_dir(self.params, self.value_dir_key_after, self.both_dir_key_after, '')
 
-        self.set_current_time()
+        if hasattr(self, 'current_time'): 
+            self.create_timedir()  # 如果已经有current_time,则创建timedir
+        else:
+            # 如果没有current_time,则使用当前时间
+            self.set_current_time(current_time='now', update_timedir=True)
 
     def set_timedir(self, timedir, prefix=''):
         '''
@@ -8598,11 +8602,13 @@ class ParamBasedDirManager:
         self.timedir_injected = True
         self.load_params(prefix=prefix)
 
-    def set_current_time(self, current_time=None, update_timedir=True):
+    def set_current_time(self, current_time='now', update_timedir=True):
         '''
-        设置当前时间,如果不设置,则使用当前时间
+        current_time:
+        - 'now': 使用当前时间
+        - 其他字符串: 将此字符串作为当前时间
         '''
-        if current_time is None:
+        if current_time == 'now':
             self.current_time = get_time()
         else:
             self.current_time = current_time
@@ -8771,7 +8777,8 @@ class AbstractTool(abc.ABC):
     @abc.abstractmethod
     def _config_data_keeper(self):
         self.data_keeper_name = self.name
-        self.data_keeper_kwargs = {}
+        self.data_keeper_kwargs = {'data_type': 'dict', 'save_load_method': 'separate'}
+        # self.data_keeper_kwargs = {'data_type': 'OrderedDataContainer', 'save_load_method': 'lmdb', 'param_order': ..., 'included_name_list': ...} 注意设置param_order等
 
     def init_data_keeper(self):
         self.data_keeper = DataKeeper(name=self.data_keeper_name, basedir=self.dir_manager.outcomes_dir, **self.data_keeper_kwargs)
@@ -8783,7 +8790,7 @@ class AbstractTool(abc.ABC):
             self.check_all_saved()
             if params_exist and (not self.already_done):
                 print_title(f'{self.name}: Not all results saved, create new dir')
-                self.dir_manager.set_current_time()
+                self.dir_manager.set_current_time(current_time='now', update_timedir=True)
         else:
             print_title(f'{self.name}: Search params is disabled, skip search')
 
@@ -9052,7 +9059,7 @@ class Experiment(abc.ABC):
 
     def _finalize_init_tools(self):
         for tool in self.tools:
-            tool.config_data_keeper()
+            tool._config_data_keeper()
             tool.set_params(self.tool_params_dict[tool.name])
 
     def _init_tools(self):
@@ -9154,9 +9161,15 @@ class ComposedExperiment(abc.ABC):
         self.experiments = []
         self.timedir_injected = False
 
+    def set_experiment_params_dict(self, experiment_params_dict):
+        self.experiment_params_dict = experiment_params_dict
+
     def set_timedir(self, timedir):
         self.timedir = timedir
         self.timedir_injected = True
+
+    def set_current_time(self, current_time):
+        self.current_time = current_time
 
     def load(self, timedir):
         self.set_timedir(timedir)
@@ -9177,8 +9190,10 @@ class ComposedExperiment(abc.ABC):
             pass
         else:
             for experiment in self.experiments:
+                experiment.set_tool_params_dict(self.experiment_params_dict[experiment.name])
                 experiment.set_basedir(pj(self.basedir, experiment.name))
                 experiment.set_code_file_list(self.code_file_list)
+                experiment.set_current_time(self.current_time)
 
     def _init_experiments(self):
         self._minimal_init_experiments()

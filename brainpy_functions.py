@@ -1545,7 +1545,6 @@ class MonitorMixin:
 
 
 # region 神经元网络模型运行
-# 后面弃用
 class SNNSimulator(cf.MetaModel):
     '''
     支持分chunk运行,节约内存和显存
@@ -1793,7 +1792,11 @@ class SNNSimulator(cf.MetaModel):
     # endregion
 
 
-class SNNSimulatorCompose(cf.Simulator):
+class ComposedSNNSimulator(cf.Simulator):
+    def __init__(self):
+        super().__init__()
+        self.total_chunk_num = 0
+
     def _set_required_key_list(self):
         self.required_key_list = ['total_simulation_time']
 
@@ -1807,7 +1810,8 @@ class SNNSimulatorCompose(cf.Simulator):
         self.name = 'snn_simulator'
 
     def _config_data_keeper(self):
-        pass
+        self.data_keeper_name = self.name
+        self.data_keeper_kwargs = {'data_type': 'dict', 'save_load_method': 'separate'}
 
     def inject_net(self, net):
         self.net = net
@@ -1818,103 +1822,78 @@ class SNNSimulatorCompose(cf.Simulator):
     def inject_runner(self, runner):
         self.runner = runner
 
-    def update_results_from_runner(self):
+    def _update_results_from_runner(self, chunk_idx=None):
         for k, v in self.runner.mon.items():
-            if k not in self.simulation_results:
-                self.simulation_results[k] = []
-            self.simulation_results[k].append(v)
+            if chunk_idx is None:
+                processed_k = k
+            else:
+                processed_k = (chunk_idx, k)  # 添加chunk_idx到key中,以便区分不同chunk的结果
+            if processed_k not in self.data_keeper.data:
+                self.data_keeper.data[processed_k] = []
+            self.data_keeper.data[processed_k].append(v)
 
-    def organize_results(self):
-        for k in self.simulation_results.keys():
-            self.simulation_results[k] = np.concatenate(self.simulation_results[k], axis=0)
+    def _organize_results(self):
+        for k in self.data_keeper.data.keys():
+            self.data_keeper.data[k] = np.concatenate(self.data_keeper.data[k], axis=0)
 
-    def organize_chunk_simulation_results(self):
+    def _organize_chunk_results(self):
         '''
         把结果重新读取整合好,再保存
         '''
-        # 读取第一个chunk的metadata,获取所有的key
-        chunk_idx = 0
-        metadata = cf.load_pkl(cf.pj(self.outcomes_dir, f'chunk_{chunk_idx}_simulation_results', 'metadata'))
-
-        # 对每个key,读取所有chunk的结果,并且拼接,保存(这种方式比直接读取所有chunk的结果节约内存)
-        for dict_k, file_k in metadata.items():
-            self.set_simulation_results()
+        for k in self.monitors.keys():
             for chunk_idx in range(self.total_chunk_num):
-                part_simulation_results = cf.load_dict_separate(cf.pj(self.outcomes_dir, f'chunk_{chunk_idx}_simulation_results'), key_to_load=[file_k])[dict_k]
-                self.simulation_results[dict_k].append(part_simulation_results)
-            self.simulation_results[dict_k] = np.concatenate(self.simulation_results[dict_k], axis=0)
+                part_results = self.data_keeper.get_value(key=(chunk_idx, k))
+                if k not in self.data_keeper.data:
+                    self.data_keeper.data[k] = []
+                self.data_keeper.data[k].append(part_results)
+                self.data_keeper.delete(key_to_delete=[(chunk_idx, k)])  # 删除每个chunk在硬盘上的结果,只保留整合后的结果
             self.data_keeper.save()
+            self.data_keeper.release_memory()  # 释放内存
 
-        # 删除子chunk的所有文件夹
-        for chunk_idx in range(self.total_chunk_num):
-            cf.rmdir(cf.pj(self.outcomes_dir, f'chunk_{chunk_idx}_simulation_results'))
-
-    def clear_runner_mon(self):
-        '''
-        清空runner的监测器
-        '''
+    def _clear_runner_mon(self):
         if hasattr(self, 'runner'):
             self.runner.mon = None
             self.runner._monitors = None
 
-    def finalize_run_detail(self):
-        '''
-        运行结束后,整理结果
-        '''
-        self.organize_results()
-        self.clear_runner_mon()
-        self.data_keeper.save()
-        bm.clear_buffer_memory()
-
-        if self.save_mode == 'chunk' and (not self.simulation_results_exist):
-            self.organize_chunk_simulation_results()
-
-    def log_during_run(self):
+    def _log_during_run(self):
         pass
 
-    def basic_run_time_interval(self, time_interval):
+    def _basic_run_time_interval(self, time_interval, chunk_idx=None):
         self.runner.run(time_interval)
-        self.update_results_from_runner()
-        self.log_during_run()
+        self._update_results_from_runner(chunk_idx=chunk_idx)
+        self._log_during_run()
 
-    def finalize_each_chunk(self, chunk_idx):
+    def _finalize_each_chunk(self, chunk_idx):
         if self.save_mode == 'chunk':
-            self.organize_results()
-            self.data_keeper.save_data(filename=f'chunk_{chunk_idx}_results')
+            self._organize_results() # 这一步是因为每次都是append进去的,哪怕是chunk也需要先整理
+            self.data_keeper.save()
             self.data_keeper.release_memory() # 如果分段运行,一定是需要释放内存的
 
-    def run_time_interval_in_chunks(self, time_interval):
+    def _run_time_interval_in_chunks(self, time_interval):
         '''
-        分段运行模型,以防止内存溢出
+        注意chunk_idx在输入到其他函数时,要使用self.total_chunk_num,防止多次调用此method时,chunk_idx从0开始
         '''
         chunk_num = int(time_interval / self.chunk_interval) + 1
         remaining_time = time_interval
         for chunk_idx in range(chunk_num):
-            run_this_chunk = False
-
-            if self.chunk_interval <= remaining_time:
-                self.basic_run_time_interval(self.chunk_interval)
-                remaining_time -= self.chunk_interval
+            if remaining_time > 0:
+                current_chunk_duration = min(self.chunk_interval, remaining_time)
+                
+                self._basic_run_time_interval(current_chunk_duration, chunk_idx=self.total_chunk_num)
+                
+                self._finalize_each_chunk(chunk_idx=self.total_chunk_num)
+                
+                remaining_time -= current_chunk_duration
                 self.total_chunk_num += 1
-                run_this_chunk = True
-            elif remaining_time > 0:
-                self.basic_run_time_interval(remaining_time)
-                remaining_time = 0
-                self.total_chunk_num += 1
-                run_this_chunk = True
 
-            if run_this_chunk: # 有可能没有运行
-                # 注意这里第一次跑完total_chunk_num=1,所以chunk_idx这边要-1
-                self.finalize_each_chunk(chunk_idx=self.total_chunk_num-1)
-
-    def run_time_interval(self, time_interval):
+    def _run_time_interval(self, time_interval):
         '''
         运行模型,并且保存结果(自动选择分段运行还是直接运行)
         '''
         if self.chunk_interval is not None:
-            self.run_time_interval_in_chunks(time_interval)
+            self._run_time_interval_in_chunks(time_interval)
         else:
-            self.basic_run_time_interval(time_interval)
+            self._basic_run_time_interval(time_interval)
 
     def run_detail(self):
         '''
@@ -1924,10 +1903,19 @@ class SNNSimulatorCompose(cf.Simulator):
         当子类有多个阶段,需要重写此方法
         当内存紧张的时候,可以调用run_time_interval,分段运行
         '''
-        self.run_time_interval(self.total_simulation_time)
+        self._run_time_interval(self.total_simulation_time)
+
+    def after_run(self):
+        self._organize_results()
+        self._clear_runner_mon()
+        self.data_keeper.save()
+        bm.clear_buffer_memory()
+
+        if self.save_mode == 'chunk':
+            self._organize_chunk_results()
 
 
-class SNNAnalyzerCompose(cf.Analyzer):
+class ComposedSNNAnalyzer(cf.Analyzer):
     def _set_name(self):
         self.name = 'snn_analyzer'
 
@@ -2176,7 +2164,6 @@ def bm_timescale_by_multi_step_estimation(timeseries, nlags_list, dt):
 
 
 # region 神经元网络模型训练
-# 后面弃用
 class SNNTrainer(SNNSimulator):
     '''
     注意事项:
@@ -2425,7 +2412,7 @@ class SNNTrainer(SNNSimulator):
                 break
             self.current_epoch_bm.value += 1
 
-# 后面弃用
+
 class SNNFitter(SNNTrainer):
     '''
     专门用来让SNN的某种性质达到目标值,不需要输入
@@ -2655,7 +2642,7 @@ class MultiNet(bp.DynSysGroup):
             s, t, name = inp_syn_type
             getattr(self, cf.concat_str([f'{s}2{t}', name])).reset_state(batch_size)
 
-# 后面弃用
+
 class SNNNetMixin:
     def get_neuron(self):
         pass
