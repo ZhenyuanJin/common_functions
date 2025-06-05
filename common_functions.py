@@ -8700,7 +8700,8 @@ class CodeSaver:
 class AbstractTool(abc.ABC):
     def __init__(self):
         self.already_done = False
-        self._set_name()  # 子类必须实现_set_name方法,用于设置name属性
+        self._set_name() # 子类必须实现_set_name方法,用于设置name属性
+        self._config_data_keeper() # 子类必须实现_config_data_keeper方法,用于设置data_keeper
         self.enable_search = False # search 有两步,第一步为寻找参数,第二步为check_all_saved
         self.enable_skip = False # 是否跳过已经完成的任务,默认是False,子类可以修改
         self.enable_try = False # 是否允许尝试运行,如果运行失败则不报错,默认是False,子类可以修改
@@ -8708,13 +8709,35 @@ class AbstractTool(abc.ABC):
         self.release_memory_kwargs = {} # 用于设置释放内存的kwargs,子类可以修改
         self.set_params_to_attr = True # 是否将params中的参数设置到实例属性中,默认是True,子类可以修改
         self.dir_manager_kwargs = {} # 用于设置dir_manager的kwargs,子类可以修改
+        self._set_required_key_list() # 子类必须实现_set_required_key_list方法,用于设置required_key_list属性
+        self._set_optional_key_value_dict() # 子类必须实现_set_optional_key_value_dict方法,用于设置optional_key_value_dict属性
 
     @abc.abstractmethod
     def _set_name(self):
         pass
 
+    @abc.abstractmethod
+    def _set_required_key_list(self):
+        self.required_key_list = []
+
+    @abc.abstractmethod
+    def _set_optional_key_value_dict(self):
+        self.optional_key_value_dict = {}
+
+    def _check_required_keys(self):
+        for key in self.required_key_list:
+            if key not in self.params:
+                raise ValueError(f'{key} is required but not found in params')
+
+    def _check_optional_keys(self):
+        for key, value in self.optional_key_value_dict.items():
+            if key not in self.params:
+                self.params[key] = value
+
     def set_params(self, params):
         self.params = params
+        self._check_required_keys()
+        self._check_optional_keys()
         if self.set_params_to_attr:
             for key, value in params.items():
                 setattr(self, key, value)
@@ -8745,15 +8768,10 @@ class AbstractTool(abc.ABC):
             self.data_keeper.set_read_only(True)  # 确保后续的tool只能读取数据
         return self.data_keeper, self.params
 
-    def config_data_keeper(self, data_keeper_name=None, data_keeper_kwargs=None):
-        if data_keeper_name is None:
-            self.data_keeper_name = self.name
-        else:
-            self.data_keeper_name = data_keeper_name
-        if data_keeper_kwargs is None:
-            self.data_keeper_kwargs = {}
-        else:
-            self.data_keeper_kwargs = data_keeper_kwargs
+    @abc.abstractmethod
+    def _config_data_keeper(self):
+        self.data_keeper_name = self.name
+        self.data_keeper_kwargs = {}
 
     def init_data_keeper(self):
         self.data_keeper = DataKeeper(name=self.data_keeper_name, basedir=self.dir_manager.outcomes_dir, **self.data_keeper_kwargs)
@@ -8770,6 +8788,7 @@ class AbstractTool(abc.ABC):
             print_title(f'{self.name}: Search params is disabled, skip search')
 
     def check_all_saved(self):
+        '''要把状态从data_keeper中获取出来,所以不要轻易移除这个接口'''
         self.already_done = self.data_keeper.check_all_saved()
 
     def save_params(self):
@@ -8837,27 +8856,10 @@ class Analyzer(AbstractTool):
 
 
 class Visualizer(AbstractTool):
+    '''Visualizer也可以持有data_keeper,万一需要存一些画图时候产生的指标等;虽然不建议在画图的时候运算,而是分离到analyzer,但这么做提供了可能性'''
     def __init__(self):
         super().__init__()
         self.enable_try = True # 失败了问题不大,先try尽可能往后运行
-
-    def config_data_keeper(self, **kwargs):
-        '''
-        dummy
-        '''
-        pass
-
-    def init_data_keeper(self):
-        '''
-        dummy
-        '''
-        pass
-
-    def check_all_saved(self):
-        '''
-        dummy
-        '''
-        pass
 
 
 class ToolsPipeLine:
@@ -8893,7 +8895,7 @@ class ToolsPipeLine:
 
     def search_params_for_first_tool(self):
         tool = self._pipeline[0]
-        tool.finalize_init_dir_manager() # 可能要换个位置
+        tool.finalize_init_dir_manager() # 只有第一个有资格以他的信息来init_dir_manager
         tool.search_params_when_enabled()
 
     def init_data_keeper_for_each_tool(self):
@@ -8983,6 +8985,9 @@ class Experiment(abc.ABC):
     def _set_name(self):
         pass
 
+    def set_tool_params_dict(self, tool_params_dict):
+        self.tool_params_dict = tool_params_dict
+
     def set_timedir(self, timedir):
         self.timedir = timedir
         self.timedir_injected = True
@@ -9048,6 +9053,7 @@ class Experiment(abc.ABC):
     def _finalize_init_tools(self):
         for tool in self.tools:
             tool.config_data_keeper()
+            tool.set_params(self.tool_params_dict[tool.name])
 
     def _init_tools(self):
         self._minimal_init_tools()
