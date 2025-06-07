@@ -16063,10 +16063,18 @@ def get_tick_rotation(ax, axis):
     '''
     获取轴的刻度标签的旋转角度
     '''
-    if axis == 'x':
-        return ax.xaxis.get_ticklabels()[0].get_rotation()
-    elif axis == 'y':
-        return ax.yaxis.get_ticklabels()[0].get_rotation()
+    try:
+        # 尝试获取第一个刻度标签的旋转角度
+        if axis == 'x':
+            return ax.xaxis.get_ticklabels()[0].get_rotation()
+        elif axis == 'y':
+            return ax.yaxis.get_ticklabels()[0].get_rotation()
+    except IndexError:
+        # 如果没有刻度标签,返回默认角度
+        if axis == 'x':
+            return XTICK_ROTATION
+        elif axis == 'y':
+            return YTICK_ROTATION
 # endregion
 
 
