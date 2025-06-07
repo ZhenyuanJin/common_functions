@@ -8961,13 +8961,17 @@ class ToolsPipeLine:
 
     def check_results_for_each_tool(self):
         for tool in self._pipeline:
-            tool.check_all_saved()
+            if self.timedir_injected:
+                tool.already_done = True  # 如果timedir已经注入,则认为所有tool都已经完成
+            else:
+                tool.check_all_saved()
 
     def before_run(self):
         if self.timedir_injected:
             self.set_dir_manager_timedir_by_first_tool()
             self.load_params_for_each_tool()
             self.init_data_keeper_for_each_tool()
+            self.check_results_for_each_tool()
         else:
             self.search_params_for_first_tool()
             self.init_data_keeper_for_each_tool()
@@ -8975,14 +8979,11 @@ class ToolsPipeLine:
             self.code_saver.save_code()
 
     def run_detail(self):
-        if self.timedir_injected:
-            pass
-        else:
-            for i, tool in enumerate(self._pipeline):
-                tool.run()
-                if i < len(self._pipeline) - 1:
-                    for downstream_tool in self._pipeline[i + 1:]:
-                        downstream_tool.input_previous_info(*tool.propagate_info())
+        for i, tool in enumerate(self._pipeline):
+            tool.run()
+            if i < len(self._pipeline) - 1:
+                for downstream_tool in self._pipeline[i + 1:]:
+                    downstream_tool.input_previous_info(*tool.propagate_info())
 
     def after_run(self):
         # 收集所有tool的data_keeper和params
@@ -9100,13 +9101,22 @@ class Experiment(abc.ABC):
     def _minimal_init_tools(self):
         '''
         比如,创建Trainer,Simulator,Analyzer等工具实例,并将它们添加到self.tools中
+
+        注意:
+        1. 工具名称应与实例变量名一致(如工具名'trainer'对应实例 tool.name=='trainer')
+        2. 不推荐将工具实例直接赋值给self属性,如避免 self.trainer = Trainer(), _finalize_init_tools 方法后续会自动将每个工具注入为当前实验对象的属性
+        4. 只需关注工具实例创建和列表添加操作,参数配置将由后续流程处理
         '''
         self.tools = []
 
     def _finalize_init_tools(self):
         for tool in self.tools:
+            if self.timedir_injected:
+                pass # 无需从外部获取params
+            else:
+                tool.set_params(self.tool_params_dict[tool.name])
             tool._config_data_keeper()
-            tool.set_params(self.tool_params_dict[tool.name])
+            setattr(self, tool.name, tool)  # 将tool设置为experiment的属性,方便后续访问
 
     def _init_tools(self):
         self._minimal_init_tools()
@@ -9229,17 +9239,22 @@ class ComposedExperiment(abc.ABC):
 
     @abc.abstractmethod
     def _minimal_init_experiments(self):
+        '''
+        与_minimal_init_tools同理
+        '''
         self.experiments = []
 
     def _finalize_init_experiments(self):
-        if self.timedir_injected:
-            pass
-        else:
-            for experiment in self.experiments:
+        for experiment in self.experiments:
+            if self.timedir_injected:
+                pass
+            else:
                 experiment.set_tool_params_dict(self.experiment_params_dict[experiment.name])
                 experiment.set_basedir(pj(self.basedir, experiment.name))
                 experiment.set_code_file_list(self.code_file_list)
-                experiment.set_current_time(self.current_time)
+                if hasattr(self, 'current_time'):
+                    experiment.set_current_time(self.current_time)
+            setattr(self, experiment.name, experiment)  # 将experiment设置为composed_experiment的属性,方便后续访问
 
     def _init_experiments(self):
         self._minimal_init_experiments()
