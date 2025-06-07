@@ -8909,7 +8909,11 @@ class Analyzer(AbstractTool):
 
 
 class Visualizer(AbstractTool):
-    '''Visualizer也可以持有data_keeper,万一需要存一些画图时候产生的指标等;虽然不建议在画图的时候运算,而是分离到analyzer,但这么做提供了可能性'''
+    '''
+    Visualizer也可以持有data_keeper,万一需要存一些画图时候产生的指标等;虽然不建议在画图的时候运算,而是分离到analyzer,但这么做提供了可能性
+
+    区别于single visualizer等,这里的visualizer是pipeline中的一个tool,其可以持有single visualizer等
+    '''
     def __init__(self):
         super().__init__()
         self.enable_try = True # 失败了问题不大,先try尽可能往后运行
@@ -16827,6 +16831,303 @@ def get_gs_inside_gs(gs, index=None, nrows=1, ncols=1, wspace=None, hspace=None,
 # endregion
 
 
+# region 通用函数(保存图像)
+def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=SAVEFIG_PKL, ax=None, **kwargs):
+    '''
+    保存图形到指定的文件格式(搭配concat_str使用,concat_str可以用于生成文件名)
+
+    参数:
+    filename - 保存文件的基础名（不建议包含扩展名）
+    formats - 要保存的文件格式列表,默认为 [SAVEFIG_FORMAT]
+    dpi - 图像的分辨率,默认为 SAVEFIG_DPI
+    close - 是否在保存后关闭图形,默认为 True
+    bbox_inches - 设置边界框(bounding box)尺寸,默认为 BBOX_INCHES
+    '''
+    if formats is None:
+        formats = [SAVEFIG_FORMAT]
+    filename_process = update_dict(FILENAME_PROCESS, filename_process)
+
+    # 对filename进行处理
+    filename = format_filename(filename, filename_process)
+
+    # 从filename中获取文件夹名并创建文件夹
+    mkdir(os.path.dirname(filename))
+
+    if filename.endswith(('.png', '.pdf', '.eps')):
+        # 假如filename以'.png','.pdf'或'.eps'结尾,将后缀名添加到保存的格式列表中
+        formats.append(filename.split('.')[-1])
+        filename = filename[:-4]
+        
+    # 按照formats列表中的格式保存
+    for fmt in formats:
+        fig.savefig(f'{filename}.{fmt}', dpi=dpi,
+                    bbox_inches=bbox_inches, pad_inches=pad_inches, **kwargs)
+
+    # 保存fig到pkl
+    if pkl:
+        save_pkl((fig, ax), filename)
+
+    if close:
+        plt.close(fig)
+        fig = None
+
+
+def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pad_inches=PAD_INCHES, filename_process=None, pkl=False, ax=None, **kwargs):
+    '''
+    轻量级的保存图形函数,只保存位图,降低dpi,不保存pkl
+    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
+    '''
+    formats = [SAVEFIG_RASTER_FORMAT]
+    save_fig(fig, filename, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pad_inches=pad_inches, filename_process=filename_process, pkl=pkl, ax=ax, **kwargs)
+
+
+def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pkl=True, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
+    '''
+    保存3D图形的多个视角，对于每个视角，都会生成图片（并在文件名上加入角度），然后将图片合成视频。
+    对于filename,如果以'.png','.pdf'或'.eps'结尾,则按照后缀名保存,否则按照formats列表中的格式保存。
+    '''
+    if elev_list is None:
+        elev_list = [ELEV]
+    if formats is None:
+        if generate_video:
+            # 如果要生成视频,且formats没有指定，只保存位图
+            formats = [SAVEFIG_RASTER_FORMAT]
+        else:
+            # 如果不生成视频,且formats没有指定，只保存矢量图
+            formats = [SAVEFIG_VECTOR_FORMAT]
+    if video_formats is None:
+        video_formats = ['mp4', 'gif']
+    if savefig_kwargs is None:
+        savefig_kwargs = {}
+
+    if filename.endswith(('.png', '.pdf', '.eps')):
+        # 假如filename以'.png','.pdf'或'.eps'结尾,将后缀名添加到保存的格式列表中
+        formats.append(filename.split('.')[-1])
+        filename = filename[:-4]
+
+    ax = fig.get_axes()
+
+    fig_paths_dict = {}
+    fig_paths_list = []
+    for elev in elev_list:
+        for azim in azim_list:
+            set_ax_view_3d(ax, elev=elev, azim=azim)
+            local_filename = f'{filename}_elev_{str(int(elev))}_azim_{str(int(azim))}'
+            # 注意这里不能close,并且不重复存储pkl
+            save_fig(fig=fig, filename=local_filename, formats=formats,
+                        dpi=dpi, close=False, bbox_inches=bbox_inches, pkl=False, ax=ax, **savefig_kwargs)
+            fig_paths_dict[(elev, azim)] = fig_paths_dict.get((elev, azim), []) + [local_filename]
+            fig_paths_list.append(local_filename)
+
+    # 保存fig到pkl
+    if pkl:
+        save_pkl((fig, ax), filename)
+
+    if close:
+        plt.close(fig)
+
+    if generate_video:
+        fig_to_video(fig_paths_list, filename, frame_rate=frame_rate, delete_figs=delete_figs, formats=video_formats)
+        
+    if delete_figs:
+        for elev in elev_list:
+            for azim in azim_list:
+                for fmt in formats:
+                    os.remove(f'{filename}_elev_{elev}_azim_{azim}.{fmt}')
+
+    return fig_paths_dict, fig_paths_list
+
+
+def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pkl=False, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
+    '''
+    轻量级的保存3D图形的多个视角,只保存位图,降低dpi,不保存pkl,不生成视频,减少了azim_list的数量
+    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
+    '''
+    formats = [SAVEFIG_RASTER_FORMAT]
+    save_fig_3d(fig, filename, elev_list=elev_list, azim_list=azim_list, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pkl=pkl, ax=ax, generate_video=generate_video, frame_rate=frame_rate, delete_figs=delete_figs, video_formats=video_formats, savefig_kwargs=savefig_kwargs)
+
+
+def save_subfig(subfig, filename, close=False, pkl=False, **kwargs):
+    '''
+    利用bbox_inches来保存subfig
+    '''
+    bbox_inches = get_subfig_bbox_inches(subfig)
+    fig = subfig.get_figure()
+    save_fig(fig, filename, bbox_inches=bbox_inches, close=close, pkl=pkl, **kwargs)
+
+
+def save_ax(axs, filename, close=False, pkl=False, bbox_inches='tight', **kwargs):
+    '''
+    利用将其他ax设置为invisiable来保存ax
+
+    对于在subfig状态下创建的ax,无法使用这个函数
+    '''
+    iterable_ax = get_iterable_ax(axs)
+    fig = iterable_ax[0].get_figure()
+    if get_fig_type(fig) == 'subfig':
+        raise ValueError('Cannot save ax in subfig state using this function.')
+
+    original_visibility = {}
+
+    for a in fig.get_axes():
+        original_visibility[a] = a.get_visible()
+        if isinstance(iterable_ax, np.ndarray):
+            if not np.isin(a, iterable_ax):
+                a.set_visible(False)
+        else:
+            if a not in iterable_ax:
+                a.set_visible(False)
+
+    save_fig(fig, filename, close=close, pkl=pkl, bbox_inches=bbox_inches, **kwargs)
+
+    # 恢复其他ax的可见性到原始状态
+    for a in fig.get_axes():
+        a.set_visible(original_visibility[a])
+# endregion
+
+
+# region 通用函数(复制ax)
+def copy_ax_content(source_ax, target_ax):
+    """
+    将 source_ax 的内容拷贝到 target_ax 中，保持所有图形元素（如线条、散点、图例等）。
+    
+    参数:
+    source_ax (matplotlib.axes.Axes): 源 Axes 对象。
+    target_ax (matplotlib.axes.Axes): 目标 Axes 对象。
+    """
+    # 复制线条
+    for line in source_ax.get_lines():
+        target_ax.plot(line.get_xdata(), line.get_ydata(), label=line.get_label(),
+                       color=line.get_color(), linestyle=line.get_linestyle(),
+                       linewidth=line.get_linewidth(), marker=line.get_marker())
+
+    # 复制散点图 (PathCollection)
+    for collection in source_ax.collections:
+        offsets = collection.get_offsets()  # 获取散点的位置
+        colors = collection.get_facecolors()  # 获取散点的颜色
+        sizes = collection.get_sizes()  # 获取散点的大小
+        target_ax.scatter(offsets[:, 0], offsets[:, 1], c=colors, s=sizes, label=collection.get_label())
+
+    # 复制patches
+    for patch in source_ax.patches:
+        if isinstance(patch, mpatches.Rectangle):
+            new_patch = mpatches.Rectangle(patch.get_xy(), patch.get_width(), patch.get_height(),
+                                  angle=patch.angle, color=patch.get_facecolor(),
+                                  edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
+        elif isinstance(patch, mpatches.Circle):
+            new_patch = mpatches.Circle(patch.center, patch.radius, color=patch.get_facecolor(),
+                               edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
+        elif isinstance(patch, mpatches.Polygon):
+            new_patch = mpatches.Polygon(patch.get_xy(), closed=patch.get_closed(),
+                                color=patch.get_facecolor(), edgecolor=patch.get_edgecolor(),
+                                linewidth=patch.get_linewidth())
+        else:
+            continue  # 如果有不支持的 Patch 类型可以选择跳过
+        target_ax.add_patch(new_patch)
+
+    # 复制 imshow 图像
+    for img in source_ax.images:
+        target_ax.imshow(
+            img.get_array(),
+            extent=img.get_extent(),
+            origin=img.origin,
+            cmap=img.get_cmap(),
+            norm=img.norm,
+            interpolation=img.get_interpolation(),
+            alpha=img.get_alpha(),
+            aspect='auto',
+        )
+
+    # 复制标题和标签
+    target_ax.set_title(source_ax.get_title())
+    target_ax.set_xlabel(source_ax.get_xlabel())
+    target_ax.set_ylabel(source_ax.get_ylabel())
+
+    # 复制图例
+    if source_ax.get_legend() is not None:
+        handles, labels = source_ax.get_legend_handles_labels()
+        target_ax.legend(handles, labels)
+
+    # 复制刻度标签
+    target_ax.set_xticks(source_ax.get_xticks())
+    target_ax.set_xticklabels(source_ax.get_xticklabels())
+    target_ax.set_yticks(source_ax.get_yticks())
+    target_ax.set_yticklabels(source_ax.get_yticklabels())
+
+    # 复制坐标轴的限制
+    target_ax.set_xlim(source_ax.get_xlim())
+    target_ax.set_ylim(source_ax.get_ylim())
+
+    # 复制文本
+    for text in source_ax.texts:
+        target_ax.text(text.get_position()[0], text.get_position()[1], text.get_text(), fontsize=text.get_fontsize(), color=text.get_color())
+# endregion
+
+
+# region 通用函数(图片格式转换)
+def convert_fig(input_file_path, output_format):
+    input_format = input_file_path.split('.')[-1].lower()
+    output_file_path = input_file_path[:-len(input_format)] + output_format
+
+    if input_format == 'png' and output_format == 'pdf':
+        with Image.open(input_file_path) as img:
+            img.convert('RGB').save(output_file_path,
+                                    'PDF', resolution=SAVEFIG_DPI)
+
+    elif input_format == 'png' and output_format == 'eps':
+        print('png to eps is not supported')
+
+    elif input_format == 'eps' and output_format == 'png':
+        # # EPS to PNG conversion
+        with Image.open(input_file_path) as img:
+            img.load(scale=10)  # 不知道这个有什么用,但是有了就会清晰,没有就模糊
+            # img.save(output_file_path, 'PNG', dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
+            # 创建一个白色背景的画布
+            background = Image.new('RGBA', img.size, (255, 255, 255))
+            # 将EPS图像合并到背景画布上
+            composite = Image.alpha_composite(background, img.convert('RGBA'))
+            # 保存为PNG，这时不需要指定DPI，因为我们已经在背景画布上处理了图像
+            composite.save(output_file_path, 'PNG',
+                           dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
+
+    # PDF to PNG (requires pdf2fig)
+    elif input_format == 'pdf' and output_format == 'png':
+        # Increased DPI for better quality
+        figs = convert_from_path(input_file_path, dpi=SAVEFIG_DPI)
+        for i, fig in enumerate(figs):
+            fig.save(output_file_path, 'PNG')
+            break  # Assuming saving only the first page
+
+    # PDF to EPS (PDF -> PNG -> EPS)
+    elif input_format == 'pdf' and output_format == 'eps':
+        temp_fig = convert_from_path(input_file_path, dpi=SAVEFIG_DPI)[
+            0]  # Increased DPI for better quality
+        basedir = os.path.dirname(input_file_path)
+        temp_fig_path = os.path.join(basedir, 'temp.png')
+        temp_fig.save(temp_fig_path, 'PNG')
+        with Image.open(temp_fig_path) as img:
+            img.save(output_file_path, 'EPS')
+        os.remove(temp_fig_path)  # Clean up the temporary file
+
+    # EPS to PDF (EPS -> PNG -> PDF)
+    elif input_format == 'eps' and output_format == 'pdf':
+        with Image.open(input_file_path) as img:
+            img.load(scale=10)  # 不知道这个有什么用,但是有了就会清晰,没有就模糊
+            basedir = os.path.dirname(input_file_path)
+            temp_fig_path = os.path.join(basedir, 'temp.png')
+            img.save(temp_fig_path, 'PNG', dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
+        with Image.open(temp_fig_path) as temp_img:
+            temp_img.convert('RGB').save(output_file_path,
+                                         'PDF', resolution=SAVEFIG_DPI)
+        os.remove(temp_fig_path)  # Clean up the temporary file
+
+    else:
+        raise ValueError(
+            f"Conversion from {input_format} to {output_format} is not supported.")
+# endregion
+# endregion
+
+
 # region 通用函数(创建visualizer)
 class SingleVisualizer:
     '''
@@ -17156,303 +17457,6 @@ class PaperFigVisualizer(SingleVisualizer):
         if filename is None:
             filename = pj(self.figs_dir, sys._getframe(1).f_code.co_name)
         self.save_fig(filename, save_fig_kwargs=save_fig_kwargs, fig=fig)
-# endregion
-
-
-# region 通用函数(保存图像)
-def save_fig(fig, filename, formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pad_inches=PAD_INCHES, filename_process=None, pkl=SAVEFIG_PKL, ax=None, **kwargs):
-    '''
-    保存图形到指定的文件格式(搭配concat_str使用,concat_str可以用于生成文件名)
-
-    参数:
-    filename - 保存文件的基础名（不建议包含扩展名）
-    formats - 要保存的文件格式列表,默认为 [SAVEFIG_FORMAT]
-    dpi - 图像的分辨率,默认为 SAVEFIG_DPI
-    close - 是否在保存后关闭图形,默认为 True
-    bbox_inches - 设置边界框(bounding box)尺寸,默认为 BBOX_INCHES
-    '''
-    if formats is None:
-        formats = [SAVEFIG_FORMAT]
-    filename_process = update_dict(FILENAME_PROCESS, filename_process)
-
-    # 对filename进行处理
-    filename = format_filename(filename, filename_process)
-
-    # 从filename中获取文件夹名并创建文件夹
-    mkdir(os.path.dirname(filename))
-
-    if filename.endswith(('.png', '.pdf', '.eps')):
-        # 假如filename以'.png','.pdf'或'.eps'结尾,将后缀名添加到保存的格式列表中
-        formats.append(filename.split('.')[-1])
-        filename = filename[:-4]
-        
-    # 按照formats列表中的格式保存
-    for fmt in formats:
-        fig.savefig(f'{filename}.{fmt}', dpi=dpi,
-                    bbox_inches=bbox_inches, pad_inches=pad_inches, **kwargs)
-
-    # 保存fig到pkl
-    if pkl:
-        save_pkl((fig, ax), filename)
-
-    if close:
-        plt.close(fig)
-        fig = None
-
-
-def save_fig_lite(fig, filename, formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pad_inches=PAD_INCHES, filename_process=None, pkl=False, ax=None, **kwargs):
-    '''
-    轻量级的保存图形函数,只保存位图,降低dpi,不保存pkl
-    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
-    '''
-    formats = [SAVEFIG_RASTER_FORMAT]
-    save_fig(fig, filename, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pad_inches=pad_inches, filename_process=filename_process, pkl=pkl, ax=ax, **kwargs)
-
-
-def save_fig_3d(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 30), formats=None, dpi=SAVEFIG_DPI, close=True, bbox_inches=BBOX_INCHES, pkl=True, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
-    '''
-    保存3D图形的多个视角，对于每个视角，都会生成图片（并在文件名上加入角度），然后将图片合成视频。
-    对于filename,如果以'.png','.pdf'或'.eps'结尾,则按照后缀名保存,否则按照formats列表中的格式保存。
-    '''
-    if elev_list is None:
-        elev_list = [ELEV]
-    if formats is None:
-        if generate_video:
-            # 如果要生成视频,且formats没有指定，只保存位图
-            formats = [SAVEFIG_RASTER_FORMAT]
-        else:
-            # 如果不生成视频,且formats没有指定，只保存矢量图
-            formats = [SAVEFIG_VECTOR_FORMAT]
-    if video_formats is None:
-        video_formats = ['mp4', 'gif']
-    if savefig_kwargs is None:
-        savefig_kwargs = {}
-
-    if filename.endswith(('.png', '.pdf', '.eps')):
-        # 假如filename以'.png','.pdf'或'.eps'结尾,将后缀名添加到保存的格式列表中
-        formats.append(filename.split('.')[-1])
-        filename = filename[:-4]
-
-    ax = fig.get_axes()
-
-    fig_paths_dict = {}
-    fig_paths_list = []
-    for elev in elev_list:
-        for azim in azim_list:
-            set_ax_view_3d(ax, elev=elev, azim=azim)
-            local_filename = f'{filename}_elev_{str(int(elev))}_azim_{str(int(azim))}'
-            # 注意这里不能close,并且不重复存储pkl
-            save_fig(fig=fig, filename=local_filename, formats=formats,
-                        dpi=dpi, close=False, bbox_inches=bbox_inches, pkl=False, ax=ax, **savefig_kwargs)
-            fig_paths_dict[(elev, azim)] = fig_paths_dict.get((elev, azim), []) + [local_filename]
-            fig_paths_list.append(local_filename)
-
-    # 保存fig到pkl
-    if pkl:
-        save_pkl((fig, ax), filename)
-
-    if close:
-        plt.close(fig)
-
-    if generate_video:
-        fig_to_video(fig_paths_list, filename, frame_rate=frame_rate, delete_figs=delete_figs, formats=video_formats)
-        
-    if delete_figs:
-        for elev in elev_list:
-            for azim in azim_list:
-                for fmt in formats:
-                    os.remove(f'{filename}_elev_{elev}_azim_{azim}.{fmt}')
-
-    return fig_paths_dict, fig_paths_list
-
-
-def save_fig_3d_lite(fig, filename, elev_list=None, azim_list=np.arange(0, 360, 60), formats=None, dpi=SAVEFIG_DPI/3, close=True, bbox_inches='tight', pkl=False, ax=None, generate_video=False, frame_rate=FRAME_RATE, delete_figs=False, video_formats=None, savefig_kwargs=None):
-    '''
-    轻量级的保存3D图形的多个视角,只保存位图,降低dpi,不保存pkl,不生成视频,减少了azim_list的数量
-    并且bbox_inches的默认值改为'tight',这样有助于防止标题等被裁剪
-    '''
-    formats = [SAVEFIG_RASTER_FORMAT]
-    save_fig_3d(fig, filename, elev_list=elev_list, azim_list=azim_list, formats=formats, dpi=dpi, close=close, bbox_inches=bbox_inches, pkl=pkl, ax=ax, generate_video=generate_video, frame_rate=frame_rate, delete_figs=delete_figs, video_formats=video_formats, savefig_kwargs=savefig_kwargs)
-
-
-def save_subfig(subfig, filename, close=False, pkl=False, **kwargs):
-    '''
-    利用bbox_inches来保存subfig
-    '''
-    bbox_inches = get_subfig_bbox_inches(subfig)
-    fig = subfig.get_figure()
-    save_fig(fig, filename, bbox_inches=bbox_inches, close=close, pkl=pkl, **kwargs)
-
-
-def save_ax(axs, filename, close=False, pkl=False, bbox_inches='tight', **kwargs):
-    '''
-    利用将其他ax设置为invisiable来保存ax
-
-    对于在subfig状态下创建的ax,无法使用这个函数
-    '''
-    iterable_ax = get_iterable_ax(axs)
-    fig = iterable_ax[0].get_figure()
-    if get_fig_type(fig) == 'subfig':
-        raise ValueError('Cannot save ax in subfig state using this function.')
-
-    original_visibility = {}
-
-    for a in fig.get_axes():
-        original_visibility[a] = a.get_visible()
-        if isinstance(iterable_ax, np.ndarray):
-            if not np.isin(a, iterable_ax):
-                a.set_visible(False)
-        else:
-            if a not in iterable_ax:
-                a.set_visible(False)
-
-    save_fig(fig, filename, close=close, pkl=pkl, bbox_inches=bbox_inches, **kwargs)
-
-    # 恢复其他ax的可见性到原始状态
-    for a in fig.get_axes():
-        a.set_visible(original_visibility[a])
-# endregion
-
-
-# region 通用函数(复制ax)
-def copy_ax_content(source_ax, target_ax):
-    """
-    将 source_ax 的内容拷贝到 target_ax 中，保持所有图形元素（如线条、散点、图例等）。
-    
-    参数:
-    source_ax (matplotlib.axes.Axes): 源 Axes 对象。
-    target_ax (matplotlib.axes.Axes): 目标 Axes 对象。
-    """
-    # 复制线条
-    for line in source_ax.get_lines():
-        target_ax.plot(line.get_xdata(), line.get_ydata(), label=line.get_label(),
-                       color=line.get_color(), linestyle=line.get_linestyle(),
-                       linewidth=line.get_linewidth(), marker=line.get_marker())
-
-    # 复制散点图 (PathCollection)
-    for collection in source_ax.collections:
-        offsets = collection.get_offsets()  # 获取散点的位置
-        colors = collection.get_facecolors()  # 获取散点的颜色
-        sizes = collection.get_sizes()  # 获取散点的大小
-        target_ax.scatter(offsets[:, 0], offsets[:, 1], c=colors, s=sizes, label=collection.get_label())
-
-    # 复制patches
-    for patch in source_ax.patches:
-        if isinstance(patch, mpatches.Rectangle):
-            new_patch = mpatches.Rectangle(patch.get_xy(), patch.get_width(), patch.get_height(),
-                                  angle=patch.angle, color=patch.get_facecolor(),
-                                  edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
-        elif isinstance(patch, mpatches.Circle):
-            new_patch = mpatches.Circle(patch.center, patch.radius, color=patch.get_facecolor(),
-                               edgecolor=patch.get_edgecolor(), linewidth=patch.get_linewidth())
-        elif isinstance(patch, mpatches.Polygon):
-            new_patch = mpatches.Polygon(patch.get_xy(), closed=patch.get_closed(),
-                                color=patch.get_facecolor(), edgecolor=patch.get_edgecolor(),
-                                linewidth=patch.get_linewidth())
-        else:
-            continue  # 如果有不支持的 Patch 类型可以选择跳过
-        target_ax.add_patch(new_patch)
-
-    # 复制 imshow 图像
-    for img in source_ax.images:
-        target_ax.imshow(
-            img.get_array(),
-            extent=img.get_extent(),
-            origin=img.origin,
-            cmap=img.get_cmap(),
-            norm=img.norm,
-            interpolation=img.get_interpolation(),
-            alpha=img.get_alpha(),
-            aspect='auto',
-        )
-
-    # 复制标题和标签
-    target_ax.set_title(source_ax.get_title())
-    target_ax.set_xlabel(source_ax.get_xlabel())
-    target_ax.set_ylabel(source_ax.get_ylabel())
-
-    # 复制图例
-    if source_ax.get_legend() is not None:
-        handles, labels = source_ax.get_legend_handles_labels()
-        target_ax.legend(handles, labels)
-
-    # 复制刻度标签
-    target_ax.set_xticks(source_ax.get_xticks())
-    target_ax.set_xticklabels(source_ax.get_xticklabels())
-    target_ax.set_yticks(source_ax.get_yticks())
-    target_ax.set_yticklabels(source_ax.get_yticklabels())
-
-    # 复制坐标轴的限制
-    target_ax.set_xlim(source_ax.get_xlim())
-    target_ax.set_ylim(source_ax.get_ylim())
-
-    # 复制文本
-    for text in source_ax.texts:
-        target_ax.text(text.get_position()[0], text.get_position()[1], text.get_text(), fontsize=text.get_fontsize(), color=text.get_color())
-# endregion
-
-
-# region 通用函数(图片格式转换)
-def convert_fig(input_file_path, output_format):
-    input_format = input_file_path.split('.')[-1].lower()
-    output_file_path = input_file_path[:-len(input_format)] + output_format
-
-    if input_format == 'png' and output_format == 'pdf':
-        with Image.open(input_file_path) as img:
-            img.convert('RGB').save(output_file_path,
-                                    'PDF', resolution=SAVEFIG_DPI)
-
-    elif input_format == 'png' and output_format == 'eps':
-        print('png to eps is not supported')
-
-    elif input_format == 'eps' and output_format == 'png':
-        # # EPS to PNG conversion
-        with Image.open(input_file_path) as img:
-            img.load(scale=10)  # 不知道这个有什么用,但是有了就会清晰,没有就模糊
-            # img.save(output_file_path, 'PNG', dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
-            # 创建一个白色背景的画布
-            background = Image.new('RGBA', img.size, (255, 255, 255))
-            # 将EPS图像合并到背景画布上
-            composite = Image.alpha_composite(background, img.convert('RGBA'))
-            # 保存为PNG，这时不需要指定DPI，因为我们已经在背景画布上处理了图像
-            composite.save(output_file_path, 'PNG',
-                           dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
-
-    # PDF to PNG (requires pdf2fig)
-    elif input_format == 'pdf' and output_format == 'png':
-        # Increased DPI for better quality
-        figs = convert_from_path(input_file_path, dpi=SAVEFIG_DPI)
-        for i, fig in enumerate(figs):
-            fig.save(output_file_path, 'PNG')
-            break  # Assuming saving only the first page
-
-    # PDF to EPS (PDF -> PNG -> EPS)
-    elif input_format == 'pdf' and output_format == 'eps':
-        temp_fig = convert_from_path(input_file_path, dpi=SAVEFIG_DPI)[
-            0]  # Increased DPI for better quality
-        basedir = os.path.dirname(input_file_path)
-        temp_fig_path = os.path.join(basedir, 'temp.png')
-        temp_fig.save(temp_fig_path, 'PNG')
-        with Image.open(temp_fig_path) as img:
-            img.save(output_file_path, 'EPS')
-        os.remove(temp_fig_path)  # Clean up the temporary file
-
-    # EPS to PDF (EPS -> PNG -> PDF)
-    elif input_format == 'eps' and output_format == 'pdf':
-        with Image.open(input_file_path) as img:
-            img.load(scale=10)  # 不知道这个有什么用,但是有了就会清晰,没有就模糊
-            basedir = os.path.dirname(input_file_path)
-            temp_fig_path = os.path.join(basedir, 'temp.png')
-            img.save(temp_fig_path, 'PNG', dpi=(SAVEFIG_DPI, SAVEFIG_DPI))
-        with Image.open(temp_fig_path) as temp_img:
-            temp_img.convert('RGB').save(output_file_path,
-                                         'PDF', resolution=SAVEFIG_DPI)
-        os.remove(temp_fig_path)  # Clean up the temporary file
-
-    else:
-        raise ValueError(
-            f"Conversion from {input_format} to {output_format} is not supported.")
-# endregion
 # endregion
 
 
