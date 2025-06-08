@@ -1798,29 +1798,32 @@ class ComposedSNNSimulator(cf.Simulator):
         self.total_chunk_num = 0
 
     def _set_required_key_list(self):
-        self.required_key_list = ['total_simulation_time']
+        super()._set_required_key_list()
+        self.required_key_list.extend(['total_simulation_time'])
 
     def _set_optional_key_value_dict(self):
-        self.optional_key_value_dict = {
+        super()._set_optional_key_value_dict()
+        self.optional_key_value_dict.update({
+            'dt': 0.1, # ms
+            'bm_mode': bm.nonbatching_mode,  # 模式
             'chunk_interval': None,
             'save_mode': 'all'
-        }
+        })
 
     def _set_name(self):
         self.name = 'snn_simulator'
 
-    def _config_data_keeper(self):
-        self.data_keeper_name = self.name
-        self.data_keeper_kwargs = {'data_type': 'dict', 'save_load_method': 'separate'}
-
-    def inject_net(self, net):
-        self.net = net
+    @abc.abstractmethod
+    def _create_net(self):
+        self.net = None
     
-    def inject_monitors(self, monitors):
-        self.monitors = monitors
+    @abc.abstractmethod
+    def _create_monitors(self):
+        self.monitors = None
     
-    def inject_runner(self, runner):
-        self.runner = runner
+    @abc.abstractmethod
+    def _create_runner(self):
+        self.runner = bp.DSRunner(self.net, monitors=self.monitors)
 
     def _update_results_from_runner(self, chunk_idx=None):
         for k, v in self.runner.mon.items():
@@ -1895,6 +1898,14 @@ class ComposedSNNSimulator(cf.Simulator):
         else:
             self._basic_run_time_interval(time_interval)
 
+    def before_run(self):
+        super().before_run()
+        bm.set_dt(self.dt)
+        bm.set_mode(self.bm_mode)
+        self._create_net()
+        self._create_monitors()
+        self._create_runner()
+
     def run_detail(self):
         '''
         运行模型,并且保存结果
@@ -1908,7 +1919,7 @@ class ComposedSNNSimulator(cf.Simulator):
     def after_run(self):
         self._organize_results()
         self._clear_runner_mon()
-        self.data_keeper.save()
+        super().after_run()
         bm.clear_buffer_memory()
 
         if self.save_mode == 'chunk':

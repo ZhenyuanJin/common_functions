@@ -1861,6 +1861,46 @@ class FlexibleTry:
             print(error_info)  # 打印详细错误信息
             return True  # 吞掉异常
         return False  # 禁用时或没有异常时让异常传播
+
+
+def flexible_try(enable_try=True):
+    """
+    异常处理装饰器,可同时用于函数和类方法
+    
+    参数:
+        enable_try: 是否启用异常捕获 (默认True)
+        
+    示例:
+        @flexible_try(enable_try=True)
+        def func():
+            ...
+            
+        class MyClass:
+            @flexible_try(enable_try=False)
+            def method(self):
+                ...
+                
+            @classmethod
+            @flexible_try(enable_try=True)
+            def class_method(cls):
+                ...
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if enable_try:
+                try:
+                    return func(*args, **kwargs)
+                except Exception:
+                    # 捕获并打印详细错误信息
+                    error_info = get_detailed_error()
+                    print(f"{func.__name__}:\n{error_info}")
+                    return None  # 可以选择返回默认值或None
+            else:
+                # 直接执行不捕获异常
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 # endregion
 
 
@@ -8758,19 +8798,23 @@ class CodeSaver:
 
 
 class AbstractTool(abc.ABC):
+    '''
+    如果希望tools_pipeline中的tool可以被替换为其他tool,需要保证替换的tool之间name一致
+    '''
     def __init__(self):
         self.already_done = False
         self._set_name() # 子类必须实现_set_name方法,用于设置name属性
-        self._config_data_keeper() # 子类必须实现_config_data_keeper方法,用于设置data_keeper
+        self._config_data_keeper() # 子类可以修改_config_data_keeper方法,用于设置data_keeper
+        self._config_dir_manager() # 子类可以修改_config_dir_manager方法,用于设置dir_manager
         self.enable_search = False # search 有两步,第一步为寻找参数,第二步为check_all_saved
         self.enable_skip = False # 是否跳过已经完成的任务,默认是False,子类可以修改
         self.enable_try = False # 是否允许尝试运行,如果运行失败则不报错,默认是False,子类可以修改
         self.release_memory = False # 是否在运行结束后释放内存,默认是False,子类可以修改
         self.release_memory_kwargs = {} # 用于设置释放内存的kwargs,子类可以修改
         self.set_params_to_attr = True # 是否将params中的参数设置到实例属性中,默认是True,子类可以修改
-        self.dir_manager_kwargs = {} # 用于设置dir_manager的kwargs,子类可以修改
         self._set_required_key_list() # 子类必须实现_set_required_key_list方法,用于设置required_key_list属性
         self._set_optional_key_value_dict() # 子类必须实现_set_optional_key_value_dict方法,用于设置optional_key_value_dict属性
+        self.enable_delete_after_pipeline = False # 是否在pipeline结束后删除结果,默认是False,子类可以修改
 
     @abc.abstractmethod
     def _set_name(self):
@@ -8809,26 +8853,33 @@ class AbstractTool(abc.ABC):
         '''
         self.dir_manager = dir_manager
 
+    def _config_dir_manager(self):
+        self.dir_manager_kwargs = {}
+
     def finalize_init_dir_manager(self):
         self.dir_manager.update_kwargs(**self.dir_manager_kwargs)
         self.dir_manager.finalize_init()
 
-    def input_previous_info(self, data_keeper, params):
+    def input_previous_info(self, info):
         '''
-        只允许从前一个tool传入data_keeper和params
+        一般情况下,只允许从前一个tool传入data_keeper,params
         '''
-        data_keeper_name = data_keeper.name
-        setattr(self, f'{data_keeper_name}_data_keeper', data_keeper)
-        setattr(self, f'{data_keeper_name}_params', params)
+        name = info['name']
+        for k, v in info.items():
+            if k == 'name':
+                pass
+            else:
+                setattr(self, f'{name}_{k}', v)
 
     def propagate_info(self):
-        if self.data_keeper is not None: # 比如Visualizer没有data_keeper
-            pass
-        else:
-            self.data_keeper.set_read_only(True)  # 确保后续的tool只能读取数据
-        return self.data_keeper, self.params
+        self.data_keeper.set_read_only(True)  # 确保后续的tool只能读取数据
+        info = {
+            'data_keeper': self.data_keeper,
+            'params': self.params,
+            'name': self.name,
+        }
+        return info
 
-    @abc.abstractmethod
     def _config_data_keeper(self):
         self.data_keeper_name = self.name
         self.data_keeper_kwargs = {'data_type': 'dict', 'save_load_method': 'separate'}
@@ -8883,9 +8934,41 @@ class AbstractTool(abc.ABC):
 
             timer.end()
     
+    def delete_after_pipeline_if_enabled(self):
+        if self.enable_delete_after_pipeline:
+            if self.data_keeper.check_all_saved():
+                self.data_keeper.delete()
+                self.data_keeper.mark_all_saved()  # 确保运行完成的标志仍然存在
+            else:
+                raise ValueError(f'{self.name}: Cannot delete results, only after all results are saved can you delete them')
+
     def load_params(self):
         self.params = self.dir_manager.load_params(prefix=self.name, set_to_self=False)
         self.set_params(self.params)
+
+    @property
+    def logs_dir(self):
+        return self.dir_manager.logs_dir
+
+    @property
+    def figs_dir(self):
+        return self.dir_manager.figs_dir
+
+    @property
+    def models_dir(self):
+        return self.dir_manager.models_dir
+
+    @property
+    def outcomes_dir(self):
+        return self.dir_manager.outcomes_dir
+    
+    @property
+    def params_dir(self):
+        return self.dir_manager.params_dir
+    
+    @property
+    def codes_dir(self):
+        return self.dir_manager.codes_dir
 
 
 class Trainer(AbstractTool):
@@ -8907,6 +8990,28 @@ class Analyzer(AbstractTool):
         super().__init__()
         self.enable_try = True # 失败了问题不大,先try尽可能往后运行
 
+    @abc.abstractmethod
+    def _set_optional_key_value_dict(self):
+        super()._set_optional_key_value_dict()
+        self.optional_key_value_dict.update({
+            'analysis_task_list': ['all'],  # 分析任务,默认是全部
+            })
+
+    def _config_dir_manager(self):
+        super()._config_dir_manager()
+        if 'ignore_key_list' not in self.dir_manager_kwargs:
+            self.dir_manager_kwargs['ignore_key_list'] = []
+        else:
+            self.dir_manager_kwargs['ignore_key_list'].extend(['analysis_task_list'])
+
+    def whether_run_this_analysis_task(self, task):
+        if task in self.analysis_task_list or 'all' in self.analysis_task_list:
+            print_title(f'{self.model_name}: Analysis task {task} will be run')
+            return True
+        else:
+            print_title(f'{self.model_name}: Analysis task {task} will be skipped')
+            return False
+
 
 class Visualizer(AbstractTool):
     '''
@@ -8924,7 +9029,6 @@ class ToolsPipeLine:
     只允许self._pipeline中的第一个tool寻找参数和确定timedir
     所有tool共享dir_manager
 
-    experiment中有name,因为子类的experiment会有自己的具有辨识度的name
     而tools_pipeline一般不会有子类,也就不需要name
     '''
     def __init__(self):
@@ -8987,7 +9091,7 @@ class ToolsPipeLine:
             tool.run()
             if i < len(self._pipeline) - 1:
                 for downstream_tool in self._pipeline[i + 1:]:
-                    downstream_tool.input_previous_info(*tool.propagate_info())
+                    downstream_tool.input_previous_info(tool.propagate_info())
 
     def after_run(self):
         # 收集所有tool的data_keeper和params
@@ -8996,6 +9100,10 @@ class ToolsPipeLine:
         for tool in self._pipeline:
             self.data_keeper_dict[tool.name] = tool.data_keeper
             self.params_dict[tool.name] = tool.params
+
+        # 删除设定为enable_delete_after_pipeline的tool的结果
+        for tool in self._pipeline:
+            tool.delete_after_pipeline_if_enabled()
 
     def run(self):
         self.before_run()
@@ -9007,32 +9115,42 @@ class Experiment(abc.ABC):
     '''
     使用场景:
     1. 创建新文件夹并运行所有实验
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
         experiment = Experiment()
-        experiment.set_basedir('../../results')
+        experiment.set_tool_params_dict(tool_params_dict)
+        experiment.set_basedir(basedir)
         experiment.set_code_file_list([cf.current_file()])
         experiment.run()
     2. 寻找已有的文件夹,并运行实验中尚未完成的部分
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
         experiment = Experiment()
-        experiment.set_basedir('../../results')
+        experiment.set_tool_params_dict(tool_params_dict)
+        experiment.set_basedir(basedir)
         experiment.set_code_file_list([cf.current_file()])
         experiment.run()
     3. 设置current_time,将运行在一个指定time的文件夹中
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
         experiment = Experiment()
-        experiment.set_basedir('../../results')
+        experiment.set_tool_params_dict(tool_params_dict)
+        experiment.set_basedir(basedir)
         experiment.set_code_file_list([cf.current_file()])
         experiment.set_current_time('2025_11_11_12_00_00') # 甚至可以是experiment.set_current_time('best')这种模式,消除每次时间戳的差异
         experiment.run()
     4. 只手动设置了运行完成的文件夹,不运行,但表现和运行结束完全一致(自动获取params和data_keeper等)
         experiment = Experiment()
         experiment.load('../../results/2025_11_11_12_00_00')
-        # 后续可随意获取tool的params和data_keeper等
-        experiment.simulator.data_keeper.get_value('some_key')
+        experiment.tool1.data_keeper.get_value('some_key') # 后续可随意获取tool的params和data_keeper等
 
     注意:
     子类一般要结合特定的tool,这些新tool在设计时需要继承AbstractTool,并实现其run_detail方法;可以修改data_keeper的储存方式;dir_manager的设置方式等
 
-    最好自行设置name,不同experiment之间的交互通过data_keeper和params的传递来实现,而读取其他experiment的这些信息需要name
-    如果使用自动设置的name,并无问题,但将导致无法单独更换compose的experiment,因为改变name会导致无法找到之前的params和data_keeper
+    如果希望用于experiment pipeline,并希望可以替换某个experiment,需要保证替换的experiment之间name一致
     '''
     def __init__(self):
         self.timedir_injected = False
@@ -9067,12 +9185,19 @@ class Experiment(abc.ABC):
         self.previous_timedir = load_pkl(pj(self.dir_manager.params_dir, 'previous_timedir'))
         return self.previous_timedir
 
-    def input_previous_info(self, data_keeper_dict, params_dict, name):
-        setattr(self, f'{name}_data_keeper_dict', data_keeper_dict)
-        setattr(self, f'{name}_params_dict', params_dict)
+    def input_previous_info(self, info):
+        name = info['name']
+        for k, v in info.items():
+            if k == 'name':
+                pass
+            else:
+                setattr(self, f'{name}_{k}', v)
 
     def propagate_info(self):
-        return self.pipeline.data_keeper_dict, self.pipeline.params_dict, self.name
+        info = {'data_keeper_dict': self.pipeline.data_keeper_dict,
+                'params_dict': self.pipeline.params_dict,
+                'name': self.name}
+        return info
 
     def load(self, timedir):
         self.set_timedir(timedir)
@@ -9204,7 +9329,7 @@ class ExperimentPipeLine:
             if i < len(self.experiments) - 1:
                 for downstream_experiment in self.experiments[i + 1:]:
                     downstream_experiment.input_previous_info(
-                        *experiment.propagate_info()
+                        experiment.propagate_info()
                     )
 
     def after_run(self):
@@ -9217,6 +9342,41 @@ class ExperimentPipeLine:
 
 
 class ComposedExperiment(abc.ABC):
+    '''
+    使用场景:
+    1. 创建新文件夹并运行所有实验
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
+        composed_experiment = ComposedExperiment()
+        composed_experiment.set_experiment_params_dict(experiment_params_dict)
+        composed_experiment.set_basedir(basedir)
+        composed_experiment.set_code_file_list([cf.current_file()])
+        composed_experiment.run()
+    2. 寻找已有的文件夹,并运行实验中尚未完成的部分
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
+        composed_experiment = ComposedExperiment()
+        composed_experiment.set_experiment_params_dict(experiment_params_dict)
+        composed_experiment.set_basedir(basedir)
+        composed_experiment.set_code_file_list([cf.current_file()])
+        composed_experiment.run()
+    3. 设置current_time,将运行在一个指定time的文件夹中
+        basedir = '../../results'
+        basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
+
+        composed_experiment = ComposedExperiment()
+        composed_experiment.set_experiment_params_dict(experiment_params_dict)
+        composed_experiment.set_basedir(basedir)
+        composed_experiment.set_code_file_list([cf.current_file()])
+        composed_experiment.set_current_time('2025_11_11_12_00_00') # 甚至可以是composed_experiment.set_current_time('best')这种模式,消除每次时间戳的差异
+        composed_experiment.run()
+    4. 只手动设置了运行完成的文件夹,不运行,但表现和运行结束完全一致(自动获取params和data_keeper等)
+        composed_experiment = ComposedExperiment()
+        composed_experiment.load('../../results/2025_11_11_12_00_00') # 注意这里输入的文件夹是最后一个experiment的timedir
+        composed_experiment.experiment1.tool1.data_keeper.get_value('some_key') # 后续可随意获取experiment的属性
+    '''
     def __init__(self):
         self.experiments = []
         self.timedir_injected = False
