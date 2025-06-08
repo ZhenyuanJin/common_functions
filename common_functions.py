@@ -2415,6 +2415,7 @@ def get_common_subdir(basedir, subdir_names=None):
     return [os.path.join(basedir, subdir_name) for subdir_name in subdir_names]
 
 
+@not_recommend
 def get_common_subdir_dict(basedir, subdir_names=None):
     '''
     生成子目录的路径字典
@@ -2444,6 +2445,21 @@ def find_fig(filename, order=None):
         elif os.path.exists(filename[-4:]+ext):
             return filename[-4:]+ext, True
     return '', False
+
+
+def compare_line_count(file1, file2):
+    """
+    比较两个文件的行数是否相同
+
+    可以用于粗略检查两个文件是否相同,但有可能错判恰好有相同的行数但不相同的文件
+    """
+    with open(file1, 'r', encoding='utf-8') as f1:
+        lines1 = sum(1 for _ in f1)
+    
+    with open(file2, 'r', encoding='utf-8') as f2:
+        lines2 = sum(1 for _ in f2)
+    
+    return lines1 == lines2
 # endregion
 
 
@@ -2488,9 +2504,9 @@ def enum_tutorial():
 
 
 # region 保存和加载,删除相关函数
-def save_code_copy(destination_folder, code_name):
+def save_code_copy(destination_folder, code_file):
     '''
-    将code保存为一个带时间戳的副本(code_name需要带后缀)
+    将code保存为一个带时间戳的副本(code_file需要带后缀)
 
     示例:
     # 保存当前脚本
@@ -2498,23 +2514,30 @@ def save_code_copy(destination_folder, code_name):
     # 保存指定脚本
     cf.save_code_copy(basedir_code, r'../util/common_functions.py')
     '''
-    # 确保目标文件夹存在
     os.makedirs(destination_folder, exist_ok=True)
 
-    # 获取当前正在运行的code的路径
-    current_code_path = os.path.abspath(code_name)
+    abs_code_path = os.path.abspath(code_file)
     
-    # 获取当前code的名称
-    current_code_name = os.path.basename(current_code_path)
+    code_name = os.path.basename(abs_code_path)
+    file_prefix, file_extension = os.path.splitext(code_name)
+    
+    # 检查目标文件夹中是否存在行数相同的同名文件(前缀匹配)
+    for existing_file in os.listdir(destination_folder):
+        # 只检查前缀相同的文件
+        if existing_file.startswith(file_prefix + '_') and existing_file.endswith(file_extension):
+            existing_file_path = os.path.join(destination_folder, existing_file)
+            # 如果找到行数相同的文件，直接返回不保存
+            if compare_line_count(abs_code_path, existing_file_path):
+                return
     
     # 生成带时间戳的文件名
-    new_filename = f"{current_code_name.split('.')[0]}_{get_time()}.{current_code_name.split('.')[1]}"
+    new_filename = f"{file_prefix}_{get_time()}{file_extension}"
     
     # 生成目标路径
     destination_path = os.path.join(destination_folder, new_filename)
     
     # 复制文件
-    shutil.copy(current_code_path, destination_path)
+    shutil.copy(abs_code_path, destination_path)
 
 
 def save_dict_yaml(data, file_path):
@@ -9067,10 +9090,14 @@ class ToolsPipeLine:
         for tool in self._pipeline:
             tool.load_params()
 
+    def mark_already_done_for_each_tool(self):
+        for tool in self._pipeline:
+            tool.already_done = True
+
     def check_results_for_each_tool(self):
         for tool in self._pipeline:
-            if self.timedir_injected:
-                tool.already_done = True  # 如果timedir已经注入,则认为所有tool都已经完成
+            if tool.already_done:
+                pass # 有可能已经手动设置了already_done,所以不需要再检查,再检查反而有可能得到False结果,因为检查取决于标志文件是否存在,而对于enable_skip的tool,才会保存标志文件
             else:
                 tool.check_all_saved()
 
@@ -9079,7 +9106,7 @@ class ToolsPipeLine:
             self.set_dir_manager_timedir_by_first_tool()
             self.load_params_for_each_tool()
             self.init_data_keeper_for_each_tool()
-            self.check_results_for_each_tool()
+            self.mark_already_done_for_each_tool()
         else:
             self.search_params_for_first_tool()
             self.init_data_keeper_for_each_tool()
@@ -9156,6 +9183,7 @@ class Experiment(abc.ABC):
         self.timedir_injected = False
         self._set_name()  # 子类必须实现_set_name方法,用于设置name属性
         self.code_file_list = []
+        self.tool_config_dict = {}  # 不必须输入,所以设置默认值
 
     @abc.abstractmethod
     def _set_name(self):
@@ -9163,6 +9191,29 @@ class Experiment(abc.ABC):
 
     def set_tool_params_dict(self, tool_params_dict):
         self.tool_params_dict = tool_params_dict
+
+    def set_tool_config_dict(self, tool_config_dict):
+        '''
+        key: tool_name
+        value: config_dict
+
+        示例:
+        config_dict = {
+            'enable_delete_after_pipeline': True,  # 是否在pipeline结束后删除结果
+            }
+        tool_config_dict = {
+            'simulator': config_dict,
+            }
+        示例:
+        config_dict = {
+            'already_done': True,  # 手动设置已经完成,不需要再运行
+            }
+        tool_config_dict = {
+            'simulator': config_dict,
+            }
+        将会在_finalize_init_tools方法中将config_dict中的配置参数设置到tool实例中
+        '''
+        self.tool_config_dict = tool_config_dict
 
     def set_timedir(self, timedir):
         self.timedir = timedir
@@ -9244,6 +9295,9 @@ class Experiment(abc.ABC):
                 pass # 无需从外部获取params
             else:
                 tool.set_params(self.tool_params_dict[tool.name])
+                config_dict = self.tool_config_dict.get(tool.name, {})
+                for key, value in config_dict.items():
+                    setattr(tool, key, value)  # 设置tool的配置参数
             tool._config_data_keeper()
             setattr(self, tool.name, tool)  # 将tool设置为experiment的属性,方便后续访问
 
@@ -9380,9 +9434,13 @@ class ComposedExperiment(abc.ABC):
     def __init__(self):
         self.experiments = []
         self.timedir_injected = False
+        self.experiment_config_dict = {}  # 不必须输入,所以设置默认值
 
     def set_experiment_params_dict(self, experiment_params_dict):
         self.experiment_params_dict = experiment_params_dict
+
+    def set_experiment_config_dict(self, experiment_config_dict):
+        self.experiment_config_dict = experiment_config_dict
 
     def set_timedir(self, timedir):
         self.timedir = timedir
@@ -9414,6 +9472,7 @@ class ComposedExperiment(abc.ABC):
                 pass
             else:
                 experiment.set_tool_params_dict(self.experiment_params_dict[experiment.name])
+                experiment.set_tool_config_dict(self.experiment_config_dict.get(experiment.name, {}))
                 experiment.set_basedir(pj(self.basedir, experiment.name))
                 experiment.set_code_file_list(self.code_file_list)
                 if hasattr(self, 'current_time'):
