@@ -4998,7 +4998,8 @@ class DataKeeper:
     def mark_all_saved(self):
         """标记所有数据已保存"""
         save_dict({f"{self.name}_all_saved": True},
-                  pj(self._get_data_path(), f"{self.name}_all_saved"))
+                  pj(self._get_data_path(), f"{self.name}_all_saved"),
+                  format_list=['txt'])
 
     def check_all_saved(self):
         """检查保存状态"""
