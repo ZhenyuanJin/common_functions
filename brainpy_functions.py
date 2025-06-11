@@ -1807,7 +1807,6 @@ class ComposedSNNSimulator(cf.Simulator):
             'dt': 0.1, # ms
             'bm_mode': bm.nonbatching_mode,  # 模式
             'chunk_interval': None,
-            'save_mode': 'all'
         })
 
     def _set_name(self):
@@ -1843,13 +1842,17 @@ class ComposedSNNSimulator(cf.Simulator):
         '''
         把结果重新读取整合好,再保存
         '''
-        for k in self.monitors.keys():
+        key_list = list(self.monitors.keys()).copy()
+        key_list.append('ts')
+        for k in key_list:
             for chunk_idx in range(self.total_chunk_num):
                 part_results = self.data_keeper.get_value(key=(chunk_idx, k))
                 if k not in self.data_keeper.data:
                     self.data_keeper.data[k] = []
                 self.data_keeper.data[k].append(part_results)
                 self.data_keeper.delete(key_to_delete=[(chunk_idx, k)])  # 删除每个chunk在硬盘上的结果,只保留整合后的结果
+                del self.data_keeper.data[(chunk_idx, k)]
+            self.data_keeper.data[k] = np.concatenate(self.data_keeper.data[k], axis=0)
             self.data_keeper.save()
             self.data_keeper.release_memory()  # 释放内存
 
@@ -1867,7 +1870,7 @@ class ComposedSNNSimulator(cf.Simulator):
         self._log_during_run()
 
     def _finalize_each_chunk(self, chunk_idx):
-        if self.save_mode == 'chunk':
+        if self.chunk_interval is not None:
             self._organize_results() # 这一步是因为每次都是append进去的,哪怕是chunk也需要先整理
             self.data_keeper.save()
             self.data_keeper.release_memory() # 如果分段运行,一定是需要释放内存的
@@ -1922,7 +1925,7 @@ class ComposedSNNSimulator(cf.Simulator):
         super().after_run()
         bm.clear_buffer_memory()
 
-        if self.save_mode == 'chunk':
+        if self.chunk_interval is not None:
             self._organize_chunk_results()
 
 

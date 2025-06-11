@@ -2785,15 +2785,18 @@ def delete_saved_dict_separate(save_dir, key_to_delete=None):
     else:
         metadata = load_pkl(os.path.join(save_dir, 'metadata'))
         for k in key_to_delete:
-            if k in metadata:
+            if k in metadata.values(): # 注意,metadata的key是文件名,value是原始字符串
+                metadata_key = get_key_by_value(metadata, k)
                 # 找到对应的文件
-                file_list = find_files_with_any_extension(os.path.join(save_dir, metadata[k]))
+                file_list = find_files_with_any_extension(os.path.join(save_dir, metadata_key))
                 # 只有仅找到一个文件时才删除
                 if len(file_list) == 1:
                     delete_file(file_list[0])  # 删除文件
-                    del metadata[k]  # 删除metadata中的键
+                    del metadata[metadata_key]  # 删除metadata中的键
                 elif len(file_list) > 1:
                     print(f"Warning: Multiple files found for key '{k}'. Not deleting any files to avoid confusion.")
+            else:
+                print(f"{k} not found in {os.path.join(save_dir, 'metadata')}")
         save_dict(metadata, os.path.join(save_dir, 'metadata'))  # 保存更新后的metadata
 
 
@@ -3569,6 +3572,8 @@ def delete_saved_dict_lmdb(filename, key_to_delete=None):
                     if key in all_keys:
                         txn.delete(byte_key)
                         all_keys.remove(key)
+                    else:
+                        print(f"{key} not found in {os.path.join(filename, 'all_keys')}")
         save_list_txt(all_keys, os.path.join(filename, 'all_keys'))
         save_joblib(all_keys, os.path.join(filename, 'all_keys'))
 
@@ -4535,6 +4540,19 @@ def is_subdict(sub_dict, main_dict):
 def all_elements_in_dict_keys(l, d):
     """检查列表所有元素是否都是字典的键"""
     return all(element in d for element in l)
+
+
+def get_key_by_value(d, value):
+    # 先检查整个字典的值是否重复
+    values = list(d.values())
+    if len(values) != len(set(values)):
+        raise ValueError("字典的值存在重复！")
+    
+    # 查找匹配的键
+    for k, v in d.items():
+        if v == value:
+            return k
+    raise  KeyError(f"值 '{value}' 不存在于字典中")
 # endregion
 
 
@@ -4912,8 +4930,11 @@ class DataKeeper:
     def update_config_from_saved(self):
         """从已保存的数据中更新配置"""
         if check_all_file_exist(self._get_data_path()) and self.data_type == 'OrderedDataContainer':
-            self.load_func(self.data, self._get_data_path(), 
-                          key_to_load=['_config'], ensure_config=False)
+            try:
+                self.load_func(self.data, self._get_data_path(), 
+                            key_to_load=['_config'], ensure_config=False)
+            except:
+                print('Fail to update config from saved')
 
     def _get_key(self, key=None, **kwargs):
         '''
