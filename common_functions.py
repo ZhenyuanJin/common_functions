@@ -524,7 +524,7 @@ class MemoryTracker:
         for stat in stats[:top_n]:
             print(stat)
 
-    def compare_by_traceback(self, top_n=1):
+    def compare_by_traceback(self, top_n=5):
         """
         按堆栈追踪统计内存差异
         :param top_n: 显示内存占用最多的前 N 个结果
@@ -549,6 +549,32 @@ class MemoryTracker:
         self.snapshot_after = None
         tracemalloc.start(self.stack_depth)
         print(f"{self.__class__.__name__} has been reset.")
+
+
+class WithMemoryTracker:
+    def __init__(self, mode='lineno', top_n=5, stack_depth=10):
+        """
+        :param mode: 对比模式 - 'lineno'按行号 / 'traceback'按堆栈
+        :param top_n: 结果显示条数
+        :param stack_depth: 堆栈捕获深度
+        """
+        self.mode = mode
+        self.top_n = top_n
+        self.tracker = MemoryTracker(stack_depth)
+    
+    def __enter__(self):
+        """进入上下文时启动追踪"""
+        self.tracker.start()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文时停止追踪并打印结果"""
+        self.tracker.stop()
+        if self.mode == 'lineno':
+            print(self.tracker.compare_by_lineno(self.top_n))
+        else:
+            print(self.tracker.compare_by_traceback(self.top_n))
+        return False  # 不抑制异常
 # endregion
 
 
@@ -2664,18 +2690,15 @@ def get_save_function_for_object(obj):
         return save_pkl
 
 
-def save_key_value_pair(key, value, save_func_dict, save_kwargs_dict, save_dir, key_to_save):
+def save_key_value_pair(key, value, save_func_dict, save_kwargs_dict, save_dir):
     '''
     用于save_dict_separate函数,保存键值对到文件
     '''
-    if key in key_to_save:
-        str_key = hash_or_str(key)  # 将键转换为字符串或哈希值
-        save_func = save_func_dict[key]  # 获取保存函数
-        save_kwargs = save_kwargs_dict[key]  # 获取保存函数的参数
-        save_func(value, os.path.join(save_dir, str_key), **save_kwargs)  # 保存值到文件
-        return str_key, key
-    else:
-        return None, None
+    str_key = hash_or_str(key)  # 将键转换为字符串或哈希值
+    save_func = save_func_dict[key]  # 获取保存函数
+    save_kwargs = save_kwargs_dict[key]  # 获取保存函数的参数
+    save_func(value, os.path.join(save_dir, str_key), **save_kwargs)  # 保存值到文件
+    return str_key, key
 
 
 def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dict=None, overwrite=False, save_as_txt=True, process_num=1, key_to_save=None, max_depth=0, current_depth=0, remove_after_save=False):
@@ -2722,10 +2745,10 @@ def save_dict_separate(dict_data, save_dir, save_func_dict=None, save_kwargs_dic
 
     metadata = {}
 
-    results = multi_process_items_for(process_num=process_num, func=save_key_value_pair, for_dict=dict_data, kwargs={'save_func_dict': save_func_dict, 'save_kwargs_dict': save_kwargs_dict, 'save_dir': save_dir, 'key_to_save': key_to_save}, func_name=f'save dict to {save_dir}')
+    dict_data_to_save = {k: dict_data[k] for k in key_to_save}
+    results = multi_process_items_for(process_num=process_num, func=save_key_value_pair, for_dict=dict_data_to_save, kwargs={'save_func_dict': save_func_dict, 'save_kwargs_dict': save_kwargs_dict, 'save_dir': save_dir}, func_name=f'save dict to {save_dir}', use_tqdm=False)
     for r in results:
-        if r[0] is not None:
-            metadata[r[0]] = r[1]
+        metadata[r[0]] = r[1]
 
     # 保存键映射
     save_dict(metadata, os.path.join(save_dir, 'metadata'))
@@ -2911,7 +2934,7 @@ def load_dict_separate(load_dir, key_to_load=None, filter_str=None, filter_mode=
 
     loaded_data = {}
 
-    r = multi_process_list_for(process_num=process_num, func=part_load_dict_separate, for_list=os.listdir(load_dir), kwargs={'load_dir':load_dir, 'metadata': metadata, 'key_to_load': key_to_load}, func_name=f'load dict from {load_dir}', for_idx_name='subfile')
+    r = multi_process_list_for(process_num=process_num, func=part_load_dict_separate, for_list=os.listdir(load_dir), kwargs={'load_dir':load_dir, 'metadata': metadata, 'key_to_load': key_to_load}, func_name=f'load dict from {load_dir}', for_idx_name='subfile', use_tqdm=False)
     # 遍历r并提取非None值
     while r:
         k, v = r.pop(0)  # 每次从列表前端弹出一个元素
@@ -3254,8 +3277,8 @@ def compare_dict(dict1, dict2, ignore_key=None):
         local_dict1 = dict1.copy()
         local_dict2 = dict2.copy()
         for key in ignore_key:
-            local_dict1.pop(key)
-            local_dict2.pop(key)
+            local_dict1.pop(key, None)
+            local_dict2.pop(key, None)
         return local_dict1 == local_dict2
 
 
@@ -3525,8 +3548,10 @@ def _bytes_to_key(byte_key):
     return joblib.load(buffer)
 
 
-def save_dict_lmdb(data, filename, key_to_save=None, size=1, unit='gb', overwrite=True, max_size=100, max_size_unit='gb', remove_after_save=False):
+def save_dict_lmdb(data, filename, key_to_save=None, size=1, unit='gb', overwrite=True, max_size=100, max_size_unit='gb', remove_after_save=False, process_num=1):
     """根据 overwrite 决定是否覆盖"""
+    if process_num != 1: # 为了与save_dict_separate兼容,这里支持输入process_num,但是不会生效
+        print('LMDB has no multiprocess save')
     if key_to_save is None:
         key_to_save = list(data.keys())
     
@@ -3580,7 +3605,29 @@ def delete_saved_dict_lmdb(filename, key_to_delete=None):
 
 
 @_compatible_data_container
-def load_dict_lmdb(filename, key_to_load=None, ensure_config=True):
+def _load_dict_lmdb(filename, key_to_load):
+    """
+    从数据库加载数据
+    
+    为了性能上的考虑,只有在必要的时候才会得到all_keys,因为对于一个key相当多的lmdb,get_all_keys_lmdb_custom是比较耗费时间的
+    """
+    with init_lmdb(filename) as env:
+        with env.begin() as txn:
+            try:
+                return {
+                    key: joblib.load(BytesIO(txn.get(_key_to_bytes(key))))
+                    for key in key_to_load
+                }
+            except Exception as e:
+                all_keys = get_all_keys_lmdb_custom(filename)
+                if is_sublist(key_to_load, all_keys):
+                    raise ValueError(e)
+                else:
+                    raise KeyError(f"key_to_load {key_to_load} is not a sub list of all_keys in {os.path.join(filename, 'all_keys')}")
+
+
+@_compatible_data_container
+def load_dict_lmdb(filename, key_to_load=None, ensure_config=True, process_num=1):
     """
     从数据库加载数据
     
@@ -3599,27 +3646,22 @@ def load_dict_lmdb(filename, key_to_load=None, ensure_config=True):
         if '_config' in all_keys and '_config' not in key_to_load:
             key_to_load.append('_config')
     
-    with init_lmdb(filename) as env:
-        with env.begin() as txn:
-            try:
-                return {
-                    key: joblib.load(BytesIO(txn.get(_key_to_bytes(key))))
-                    for key in key_to_load
-                }
-            except Exception as e:
-                if all_keys is None:
-                    all_keys = get_all_keys_lmdb_custom(filename)
-                if is_sublist(key_to_load, all_keys):
-                    raise ValueError(e)
-                else:
-                    raise KeyError(f"key_to_load {key_to_load} is not a sub list of {all_keys}")
+    divided_key_to_load = split_list(key_to_load, process_num)
+    kwargs_list = []
+    for k_to_load in divided_key_to_load:
+        kwargs_list.append({'filename': filename, 'key_to_load': k_to_load})
+    result_list = multi_process(process_num=process_num, func=_load_dict_lmdb, kwargs_list=kwargs_list, func_name='load_dict_lmdb')
+    r = {}
+    for result in result_list:
+        r.update(result)
+    return r
 
 
-def load_dict_lmdb_merge_to_exist(exist_dict, filename, key_to_load=None, ensure_config=True):
+def load_dict_lmdb_merge_to_exist(exist_dict, filename, key_to_load=None, ensure_config=True, process_num=1):
     '''
     见load_dict_separate_merge_to_exist
     '''
-    loaded_data = load_dict_lmdb(filename, key_to_load=key_to_load, ensure_config=ensure_config)
+    loaded_data = load_dict_lmdb(filename, key_to_load=key_to_load, ensure_config=ensure_config, process_num=process_num)
     if '_config' in loaded_data.keys():
         config = loaded_data.pop('_config')
         exist_dict['_config']['param_map'].update(config['param_map'])
@@ -3845,7 +3887,7 @@ def multi_process_for_different_func(process_num, func_list, args_list=None, kwa
 
 def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name=''):
     '''
-    多进程并行处理函数
+    多进程并行处理函数,内部使用multi_process_for_different_func
 
     参数:
     - process_num: int,并行处理的进程数(由于multi_process状态下,代码错误的提示难以看出错误位置,在测试时可以先把process_num设置为1,这时会按照正常默认方式运行和报错)
@@ -3882,14 +3924,18 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name
     return multi_process_for_different_func(process_num, func_list, args_list, kwargs_list, func_name)
 
 
-def part_list_for(func, for_list, for_idx_name, *args, **kwargs):
+def part_list_for(func, for_list, for_idx_name, use_tqdm, *args, **kwargs):
+    if use_tqdm:
+        iterable = tqdm.tqdm(for_list)
+    else:
+        iterable = for_list
     results = []
-    for i in tqdm.tqdm(for_list):
+    for i in iterable:
         results.append(func(*args, **{**kwargs, for_idx_name: i}))
     return results
 
 
-def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', func_name=''):
+def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', func_name='', use_tqdm=True):
     '''
     多进程并行处理for循环,for循环形式为for i in for_list
 
@@ -3915,19 +3961,23 @@ def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=N
         process_num = len(for_list)
 
     divided_list = split_list(for_list, process_num)
-    args_list = [(func, divided, for_idx_name)+args for divided in divided_list]
+    args_list = [(func, divided, for_idx_name, use_tqdm)+args for divided in divided_list]
     kwargs_list = [kwargs] * process_num
     return flatten_list(multi_process(process_num, part_list_for, args_list, kwargs_list, func_name), level=1)
 
 
-def part_enumerate_for(func, idx_list, for_list, for_idx_name, for_item_name, *args, **kwargs):
+def part_enumerate_for(func, idx_list, for_list, for_idx_name, for_item_name, use_tqdm, *args, **kwargs):
+    if use_tqdm:
+        iterable = tqdm.tqdm(zip(idx_list, for_list))
+    else:
+        iterable = zip(idx_list, for_list)
     results = []
-    for i, item in tqdm.tqdm(zip(idx_list, for_list)):
+    for i, item in iterable:
         results.append(func(*args, **{**kwargs, for_idx_name: i, for_item_name: item}))
     return results
 
 
-def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', for_item_name='item', func_name=''):
+def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_list=None, for_idx_name='i', for_item_name='item', func_name='', use_tqdm=True):
     '''
     多进程并行处理for循环,for循环形式为for i, item in enumerate(for_list)
 
@@ -3952,19 +4002,23 @@ def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_l
 
     divided_idx_list = split_list(range(len(for_list)), process_num)
     divided_list = split_list(for_list, process_num)
-    args_list = [(func, divided_idx, divided, for_idx_name, for_item_name)+args for divided_idx, divided in zip(divided_idx_list, divided_list)]
+    args_list = [(func, divided_idx, divided, for_idx_name, for_item_name, use_tqdm)+args for divided_idx, divided in zip(divided_idx_list, divided_list)]
     kwargs_list = [kwargs] * process_num
     return flatten_list(multi_process(process_num, part_enumerate_for, args_list, kwargs_list, func_name), level=1)
 
 
-def part_items_for(func, key_list, value_list, for_key_name, for_value_name, *args, **kwargs):
+def part_items_for(func, key_list, value_list, for_key_name, for_value_name, use_tqdm, *args, **kwargs):
+    if use_tqdm:
+        iterable = tqdm.tqdm(zip(key_list, value_list))
+    else:
+        iterable = zip(key_list, value_list)
     results = []
-    for key, value in tqdm.tqdm(zip(key_list, value_list)):
+    for key, value in iterable:
         results.append(func(*args, **{**kwargs, for_key_name: key, for_value_name: value}))
     return results
 
 
-def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=None, for_key_name='key', for_value_name='value', func_name=''):
+def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=None, for_key_name='key', for_value_name='value', func_name='', use_tqdm=True):
     '''
     多进程并行处理for循环,for循环形式为for key, value in for_dict.items()
 
@@ -3996,7 +4050,7 @@ def multi_process_items_for(process_num, func, args=None, kwargs=None, for_dict=
     
     divided_key_list = split_list(list(for_dict.keys()), process_num)
     divided_value_list = split_list(list(for_dict.values()), process_num)
-    args_list = [(func, divided_key, divided_value, for_key_name, for_value_name)+args for divided_key, divided_value in zip(divided_key_list, divided_value_list)]
+    args_list = [(func, divided_key, divided_value, for_key_name, for_value_name, use_tqdm)+args for divided_key, divided_value in zip(divided_key_list, divided_value_list)]
     kwargs_list = [kwargs] * process_num
     return flatten_list(multi_process(process_num, part_items_for, args_list, kwargs_list, func_name), level=1)
 # endregion
@@ -4879,6 +4933,7 @@ class DataKeeper:
     """
     def __init__(self, name, basedir, data_type='dict', save_load_method='separate', param_order=None):
         self.read_only = False  # 默认可读写
+        self.process_num = 1  # 默认单process
 
         self.name = name
         self.basedir = basedir
@@ -4929,7 +4984,7 @@ class DataKeeper:
 
     def load(self, **kwargs):
         """从磁盘加载数据"""
-        self.load_func(self.data, self._get_data_path(), **kwargs)
+        self.load_func(self.data, self._get_data_path(), process_num=self.process_num, **kwargs)
 
     def update_config_from_saved(self):
         """从已保存的数据中更新配置"""
@@ -4996,7 +5051,7 @@ class DataKeeper:
         if self.read_only:
             raise PermissionError("DataKeeper is read-only, cannot save data")
         else:
-            self.save_func(self.data, self._get_data_path(), **kwargs)
+            self.save_func(self.data, self._get_data_path(), process_num=self.process_num, **kwargs)
             print_title(f"{self.name} saved")
 
     def mark_all_saved(self):
@@ -8849,6 +8904,10 @@ class CodeSaver:
 class AbstractTool(abc.ABC):
     '''
     如果希望tools_pipeline中的tool可以被替换为其他tool,需要保证替换的tool之间name一致
+
+    注意:
+    和结果相关的参数,利用set_params输入
+    和结果无关的设定,利用experiment中的set_tool_config_dict输入(例如process_num等)
     '''
     def __init__(self):
         self.already_done = False
@@ -8864,6 +8923,7 @@ class AbstractTool(abc.ABC):
         self._set_required_key_list() # 子类必须实现_set_required_key_list方法,用于设置required_key_list属性
         self._set_optional_key_value_dict() # 子类必须实现_set_optional_key_value_dict方法,用于设置optional_key_value_dict属性
         self.enable_delete_after_pipeline = False # 是否在pipeline结束后删除结果,默认是False,子类可以修改
+        self.process_num = 1 # datakeeper读取和保存的process数量
 
     @abc.abstractmethod
     def _set_name(self):
@@ -8875,7 +8935,9 @@ class AbstractTool(abc.ABC):
 
     @abc.abstractmethod
     def _set_optional_key_value_dict(self):
-        self.optional_key_value_dict = {}
+        self.optional_key_value_dict = {
+            'process_num': 1
+        }
 
     def _check_required_keys(self):
         for key in self.required_key_list:
@@ -8903,7 +8965,14 @@ class AbstractTool(abc.ABC):
         self.dir_manager = dir_manager
 
     def _config_dir_manager(self):
-        self.dir_manager_kwargs = {}
+        self.dir_manager_kwargs = {
+            'value_dir_key_before': [],
+            'both_dir_key_before': [],
+            'value_dir_key_after': [],
+            'both_dir_key_after': [],
+            'ignore_key_list': [],
+            'pop': False
+        }
 
     def finalize_init_dir_manager(self):
         self.dir_manager.update_kwargs(**self.dir_manager_kwargs)
@@ -8936,6 +9005,7 @@ class AbstractTool(abc.ABC):
 
     def init_data_keeper(self):
         self.data_keeper = DataKeeper(name=self.data_keeper_name, basedir=self.dir_manager.outcomes_dir, **self.data_keeper_kwargs)
+        self.data_keeper.process_num = self.process_num
 
     def search_params_when_enabled(self):
         if self.enable_search:
@@ -9038,20 +9108,7 @@ class Analyzer(AbstractTool):
     def __init__(self):
         super().__init__()
         self.enable_try = True # 失败了问题不大,先try尽可能往后运行
-
-    @abc.abstractmethod
-    def _set_optional_key_value_dict(self):
-        super()._set_optional_key_value_dict()
-        self.optional_key_value_dict.update({
-            'analysis_task_list': ['all'],  # 分析任务,默认是全部
-            })
-
-    def _config_dir_manager(self):
-        super()._config_dir_manager()
-        if 'ignore_key_list' not in self.dir_manager_kwargs:
-            self.dir_manager_kwargs['ignore_key_list'] = []
-        else:
-            self.dir_manager_kwargs['ignore_key_list'].extend(['analysis_task_list'])
+        self.analysis_task_list = ['all']  # 分析任务,默认是全部
 
     def whether_run_this_analysis_task(self, task):
         if task in self.analysis_task_list or 'all' in self.analysis_task_list:

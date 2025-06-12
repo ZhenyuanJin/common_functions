@@ -1796,6 +1796,7 @@ class ComposedSNNSimulator(cf.Simulator):
     def __init__(self):
         super().__init__()
         self.total_chunk_num = 0
+        self.bm_mode = bm.nonbatching_mode
 
     def _set_required_key_list(self):
         super()._set_required_key_list()
@@ -1805,9 +1806,12 @@ class ComposedSNNSimulator(cf.Simulator):
         super()._set_optional_key_value_dict()
         self.optional_key_value_dict.update({
             'dt': 0.1, # ms
-            'bm_mode': bm.nonbatching_mode,  # 模式
             'chunk_interval': None,
         })
+
+    def _config_dir_manager(self):
+        super()._config_dir_manager()
+        self.dir_manager_kwargs['ignore_key_list'].extend(['chunk_interval'])
 
     def _set_name(self):
         self.name = 'snn_simulator'
@@ -1869,7 +1873,7 @@ class ComposedSNNSimulator(cf.Simulator):
         self._update_results_from_runner(chunk_idx=chunk_idx)
         self._log_during_run()
 
-    def _finalize_each_chunk(self, chunk_idx):
+    def _finalize_each_chunk(self):
         if self.chunk_interval is not None:
             self._organize_results() # 这一步是因为每次都是append进去的,哪怕是chunk也需要先整理
             self.data_keeper.save()
@@ -1887,7 +1891,7 @@ class ComposedSNNSimulator(cf.Simulator):
                 
                 self._basic_run_time_interval(current_chunk_duration, chunk_idx=self.total_chunk_num)
                 
-                self._finalize_each_chunk(chunk_idx=self.total_chunk_num)
+                self._finalize_each_chunk()
                 
                 remaining_time -= current_chunk_duration
                 self.total_chunk_num += 1
