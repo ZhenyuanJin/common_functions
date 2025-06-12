@@ -41,6 +41,7 @@ import yaml
 import lmdb
 from pympler import asizeof
 import traceback
+import tqdm
 
 
 # 数学和科学计算库
@@ -3817,7 +3818,10 @@ def _run_multi_func(func_list, args_list, kwargs_list):
     '''
     运行多函数
     '''
-    return [func(*args, **kwargs) for func, args, kwargs in zip(func_list, args_list, kwargs_list)]
+    results = []
+    for func, args, kwargs in zip(func_list, args_list, kwargs_list):
+        results.append(func(*args, **kwargs))
+    return results
 
 
 def multi_process_for_different_func(process_num, func_list, args_list=None, kwargs_list=None, task_name=''):
@@ -3880,7 +3884,7 @@ def multi_process(process_num, func, args_list=None, kwargs_list=None, func_name
 
 def part_list_for(func, for_list, for_idx_name, *args, **kwargs):
     results = []
-    for i in for_list:
+    for i in tqdm.tqdm(for_list):
         results.append(func(*args, **{**kwargs, for_idx_name: i}))
     return results
 
@@ -3918,7 +3922,7 @@ def multi_process_list_for(process_num, func, args=None, kwargs=None, for_list=N
 
 def part_enumerate_for(func, idx_list, for_list, for_idx_name, for_item_name, *args, **kwargs):
     results = []
-    for i, item in zip(idx_list, for_list):
+    for i, item in tqdm.tqdm(zip(idx_list, for_list)):
         results.append(func(*args, **{**kwargs, for_idx_name: i, for_item_name: item}))
     return results
 
@@ -3955,7 +3959,7 @@ def multi_process_enumerate_for(process_num, func, args=None, kwargs=None, for_l
 
 def part_items_for(func, key_list, value_list, for_key_name, for_value_name, *args, **kwargs):
     results = []
-    for key, value in zip(key_list, value_list):
+    for key, value in tqdm.tqdm(zip(key_list, value_list)):
         results.append(func(*args, **{**kwargs, for_key_name: key, for_value_name: value}))
     return results
 
