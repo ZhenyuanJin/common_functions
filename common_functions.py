@@ -201,6 +201,31 @@ TICK_MINOR_SIZE = 4     # x轴次刻度线的长度
 TICK_DIRECTION = 'out'     # 刻度线的方向
 RM_REPEAT_TICK_LABEL_WHEN_SHARE = True     # 当共享坐标轴时,去除重复的刻度标签
 AX_FACECOLOR = (1., 1., 1., 0.5)     # 背景具有一定的透明度,防止遮挡
+
+
+def set_font_size(font_size):
+    '''
+    目前并未生效,函数的默认值绑定导致了这个问题,需要设置为none在内部赋予
+    '''
+    global FONT_SIZE, TITLE_SIZE, LABEL_SIZE, TICK_SIZE, LEGEND_SIZE
+    
+    FONT_SIZE = font_size
+    TITLE_SIZE = FONT_SIZE*2
+    SUP_TITLE_SIZE = FONT_SIZE*3
+    LABEL_SIZE = FONT_SIZE*2
+    TICK_SIZE = FONT_SIZE*4/3
+    LEGEND_SIZE = FONT_SIZE*4/3
+    
+    # 更新Matplotlib全局设置
+    plt.rcParams.update({
+        'font.size': FONT_SIZE,
+        'axes.titlesize': TITLE_SIZE,
+        'axes.labelsize': LABEL_SIZE,
+        'xtick.labelsize': TICK_SIZE,
+        'ytick.labelsize': TICK_SIZE,
+        'legend.fontsize': LEGEND_SIZE,
+        'figure.titlesize': SUP_TITLE_SIZE
+    })
 # endregion
 
 
@@ -13505,6 +13530,46 @@ def align_text_obj(text_obj_list, ref_text_obj, ref_ax=None, ha_align_mode='left
             raise ValueError("Unsupported va align mode: {}".format(va_align_mode))
 
         text_obj.set_position((new_x, new_y))
+
+
+def _scale_font_size(text_obj, factor):
+    if text_obj:                      # could be None
+        text_obj.set_fontsize(text_obj.get_fontsize() * factor)
+
+
+def scale_ax_font_size(ax, factor=1.0):
+    """缩放单个 Axes 内所有文字"""
+
+    # 标题与轴标签
+    _scale_font_size(ax.title, factor)
+    _scale_font_size(ax.xaxis.label, factor)
+    _scale_font_size(ax.yaxis.label, factor)
+
+    # 刻度
+    for t in ax.get_xticklabels() + ax.get_yticklabels():
+        _scale_font_size(t, factor)
+
+    # # legend（直接修改，保持位置等属性）
+    lgd = ax.get_legend()
+    if lgd:
+        _scale_font_size(lgd.get_title(), factor)
+        for t in lgd.get_texts():
+            _scale_font_size(t, factor)
+
+    # 通过 ax.text 添加的文字
+    for t in ax.texts:
+        if t not in (ax.title, ax.xaxis.label, ax.yaxis.label):
+            _scale_font_size(t, factor)
+
+
+def scale_fig_font_size(fig, factor=1.0):
+    """缩放整张 Figure 内所有文字"""
+
+    _scale_font_size(getattr(fig, "_suptitle", None), factor)  # suptitle
+    for t in fig.texts:                              # fig.text
+        _scale_font_size(t, factor)
+    for ax in fig.axes:                              # 每个子图
+        scale_ax_font_size(ax, factor)
 # endregion
 
 
