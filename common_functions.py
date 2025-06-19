@@ -4775,7 +4775,7 @@ class DataContainer(dict):
         sub = dc.get_subcontainer(area='V1', prop='spike', remove_matched_params=False)
         则返回一个新的DataContainer,其中包含所有匹配的参数,并且保留匹配的参数
         """
-        subcontainer = DataContainer(included_name_list=self.included_name_list)
+        subcontainer = DataContainer(included_name_list=self['_config']['included_name_list'])
         self._set_subcontainer(subcontainer, remove_matched_params=remove_matched_params, **kwargs)
         return subcontainer
 
