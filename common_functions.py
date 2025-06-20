@@ -8960,9 +8960,7 @@ class AbstractTool(abc.ABC):
 
     @abc.abstractmethod
     def _set_optional_key_value_dict(self):
-        self.optional_key_value_dict = {
-            'process_num': 1
-        }
+        self.optional_key_value_dict = {}
 
     def _check_required_keys(self):
         for key in self.required_key_list:
@@ -9115,6 +9113,35 @@ class AbstractTool(abc.ABC):
         return self.dir_manager.codes_dir
 
 
+class NoSkipTool(AbstractTool):
+    '''
+    用来传递无法保存的对象,所以无法跳过,不管什么情形都需要重新运行
+    '''
+    @property
+    def already_done(self):
+        return False
+    
+    @already_done.setter
+    def already_done(self, value):
+        pass  # 有意忽略所有赋值操作
+
+    @property
+    def enable_skip(self):
+        return False
+
+    @enable_skip.setter
+    def enable_skip(self, value):
+        pass
+
+    @property
+    def enable_search(self):
+        return False
+    
+    @enable_search.setter
+    def enable_search(self, value):
+        pass
+
+
 class Trainer(AbstractTool):
     def __init__(self):
         super().__init__()
@@ -9258,7 +9285,7 @@ class Experiment(abc.ABC):
         experiment.set_basedir(basedir)
         experiment.set_code_file_list([cf.current_file()])
         experiment.run()
-    2. 寻找已有的文件夹,并运行实验中尚未完成的部分
+    2. 寻找已有的文件夹,并运行实验中尚未完成的部分(注意第一个tool需要开启enable_search)
         basedir = '../../results'
         basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
 
@@ -9267,7 +9294,7 @@ class Experiment(abc.ABC):
         experiment.set_basedir(basedir)
         experiment.set_code_file_list([cf.current_file()])
         experiment.run()
-    3. 设置current_time,将运行在一个指定time的文件夹中
+    3. 设置current_time,将运行在一个指定time的文件夹中(当你不想要current_time这个子目录时,设置为'')
         basedir = '../../results'
         basedir = os.path.join(basedir, os.path.splitext(os.path.basename(cf.current_file()))[0])
 
