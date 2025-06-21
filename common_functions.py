@@ -1897,22 +1897,39 @@ class FlexibleTry:
     示例:
     with FlexibleTry(enable_try=True):
         print(1/0)  # 会捕获异常并打印详细错误信息
+    
     with FlexibleTry(enable_try=False):
         print(1/0)  # 会抛出异常
+    
+    with FlexibleTry(enable_try=True) as ft:
+        print(1/0)  # 会捕获异常并打印详细错误信息
+    print(ft.success)  # True or False, 是否成功
+    print(ft.exception)  # 如果发生异常, 则为异常对象, 否则为None
     '''
     def __init__(self, enable_try=True):
         self.enable_try = enable_try
         
     def __enter__(self):
         return self
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # 没有发生异常
+        if exc_type is None:
+            self.success = True
+            self.exception = None
+            return False
+        
+        # 发生异常时的处理
+        self.success = False
+        self.exception = exc_val
+        
         if self.enable_try and exc_type:
             # 当启用异常捕获且发生异常时，获取详细错误信息
             error_info = get_detailed_error()
             print(error_info)  # 打印详细错误信息
             return True  # 吞掉异常
-        return False  # 禁用时或没有异常时让异常传播
+        
+        return False  # 抛出异常
 
 
 def flexible_try(enable_try=True):
@@ -3819,12 +3836,10 @@ def basic_multi_process(process_num, func_list, args_list=None, kwargs_list=None
 
             # 等待所有future对象按照提交的顺序完成，并收集结果
             for future in futures:
-                try:
-                    # 这里按照futures的顺序获取结果，保证结果的顺序与提交顺序相同
+                with FlexibleTry() as ft:
                     results.append(future.result())
-                except Exception as e:
+                if not ft.success:
                     results.append(None)
-                    print(f"An error occurred: {e}")
         print_title(f"Finish {task_name}")
         return results
     elif process_num == 1:
@@ -7759,11 +7774,11 @@ def get_ccovf(x, y, T=None, sample_rate=None, nlags=None, nan_policy='interpolat
     return lag_times, ccf_values * np.std(x) * np.std(y)
 
 
-def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1, **kwargs):
+def get_multi_acf(multi_timeseries, T=None, sample_rate=None, nlags=None, fft=True, nan_policy='interpolate', fill_value=0, inf_policy=INF_POLICY, process_num=1, use_tqdm=True, **kwargs):
     '''
     处理多个时间序列的自相关函数 (ACF) 并返回结果,multi_timeseries的shape为(time_series_num, time_series_length)
     '''
-    r = multi_process_list_for(process_num=process_num, func=get_acf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy, **kwargs}, for_idx_name='timeseries')
+    r = multi_process_list_for(process_num=process_num, func=get_acf, for_list=multi_timeseries, kwargs={'T': T, 'sample_rate': sample_rate, 'nlags': nlags, 'fft': fft, 'nan_policy': nan_policy, 'fill_value': fill_value, 'inf_policy': inf_policy, **kwargs}, for_idx_name='timeseries', use_tqdm=use_tqdm)
     lag_times = r[0][0]
     multi_acf = np.array([i[1] for i in r])
     return lag_times, multi_acf
