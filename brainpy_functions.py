@@ -438,14 +438,6 @@ def single_exp_fit(lag_times, acf, fix_amp_value=None):
         results['error'] = np.nan
         results['cov'] = np.nan
     return results
-
-
-# class SpikeAnalyzer:
-#     def input_spike(self, spike, dt):
-#         pass
-
-#     def run(self):
-#         pass
 # endregion
 
 
